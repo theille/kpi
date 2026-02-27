@@ -282,8 +282,69 @@ class _SettingsPageState extends State<SettingsPage> {
     return const _Op(required: false, doneIso: null, hasSomething: true);
   }
 
+  // ===== Helpers colonnes souples =====
 
-  // ✅ Choisit la feuille KPI automatiquement (pas juste "2e feuille")
+  String _normalizeHeader(String s) {
+    return s
+        .replaceAll('\u00A0', ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim()
+        .toLowerCase()
+        .replaceAll('é', 'e')
+        .replaceAll('è', 'e')
+        .replaceAll('ê', 'e')
+        .replaceAll('ë', 'e')
+        .replaceAll('à', 'a')
+        .replaceAll('â', 'a')
+        .replaceAll('ä', 'a')
+        .replaceAll('î', 'i')
+        .replaceAll('ï', 'i')
+        .replaceAll('ô', 'o')
+        .replaceAll('ö', 'o')
+        .replaceAll('ù', 'u')
+        .replaceAll('û', 'u')
+        .replaceAll('ü', 'u')
+        .replaceAll('ç', 'c')
+        .replaceAll("'", ' ')
+        .replaceAll('-', ' ')
+        .replaceAll('/', ' ')
+        .replaceAll(RegExp(r'[^a-z0-9 ]'), '')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  int _findHeaderIndex(List<String> header, List<String> aliases, {bool required = true}) {
+    final normalizedHeader = header.map(_normalizeHeader).toList();
+    final normalizedAliases = aliases.map(_normalizeHeader).toList();
+
+    // 1) match exact
+    for (final alias in normalizedAliases) {
+      final idx = normalizedHeader.indexOf(alias);
+      if (idx >= 0) return idx;
+    }
+
+    // 2) match partiel
+    for (var i = 0; i < normalizedHeader.length; i++) {
+      final h = normalizedHeader[i];
+      for (final alias in normalizedAliases) {
+        if (h.contains(alias) || alias.contains(h)) {
+          return i;
+        }
+      }
+    }
+
+    if (required) {
+      throw Exception("Colonne introuvable (aliases: ${aliases.join(' / ')})");
+    }
+    return -1;
+  }
+
+  dynamic _cellAt(List<dynamic> row, int index) {
+    if (index < 0 || index >= row.length) return null;
+    return row[index];
+  }
+
+  // ✅ Choisit la feuille KPI automatiquement (détection souple)
   ex.Sheet? _pickKpiSheet(ex.Excel excel) {
     final tables = excel.tables;
     if (tables.isEmpty) return null;
@@ -293,20 +354,28 @@ class _SettingsPageState extends State<SettingsPage> {
       if (sheet.rows.isEmpty) continue;
 
       final header = sheet.rows.first.map((c) => _cellString(c?.value)).toList();
-      final lower = header.map((h) => h.toLowerCase()).toList();
+      final normalized = header.map(_normalizeHeader).toList();
 
-      final hasImmat = lower.contains('immat');
-      final hasMarque = lower.contains('marque');
-      final hasModele = lower.contains('modele');
+      bool hasAny(List<String> aliases) {
+        final aliasNorm = aliases.map(_normalizeHeader).toSet();
+        return normalized.any(aliasNorm.contains);
+      }
 
-      if (hasImmat && hasMarque && hasModele) {
+      final hasPlate = hasAny(['immat', 'immatriculation', 'plaque']);
+      final hasBrand = hasAny(['marque']);
+      final hasModel = hasAny(['modele', 'modèle', 'model']);
+      final hasEntry = hasAny(['entree', 'entrée', 'date entree', 'date d entree']);
+      final hasOps = hasAny(['aos', 'proovstation', 'equipment', 'carcheck', 'aviloo']);
+
+      if (hasPlate && hasBrand && hasModel && hasEntry && hasOps) {
         return sheet;
       }
     }
 
-    // fallback: si on ne trouve pas, on tente la 2e si dispo
+    // fallback : feuille la plus large
     final list = tables.values.toList();
-    if (list.length >= 2) return list[1];
+    if (list.isEmpty) return null;
+    list.sort((a, b) => b.maxColumns.compareTo(a.maxColumns));
     return list.first;
   }
 
@@ -320,64 +389,39 @@ class _SettingsPageState extends State<SettingsPage> {
         .map((c) => _cellString(c?.value))
         .toList();
 
-    String _norm(String s) {
-      return s
-          .replaceAll('\u00A0', ' ')
-          .replaceAll(RegExp(r'\s+'), ' ')
-          .trim()
-          .toLowerCase()
-          .replaceAll('é', 'e')
-          .replaceAll('è', 'e')
-          .replaceAll('ê', 'e')
-          .replaceAll('à', 'a')
-          .replaceAll('ç', 'c');
-    }
+    // ✅ Colonnes souples (ordre libre, noms tolérés)
+    final iPlate = _findHeaderIndex(header, ['Immat', 'Immatriculation', 'Plaque']);
+    final iBrand = _findHeaderIndex(header, ['MARQUE', 'Marque']);
+    final iModel = _findHeaderIndex(header, ['Modele', 'Modèle', 'Model']);
+    final iSite = _findHeaderIndex(header, ['Site']);
+    final iEntry = _findHeaderIndex(header, ['Entrée', 'Entree', 'Date entrée', 'Date entree']);
 
-    int idx(String name) => header.indexWhere((h) => _norm(h) == _norm(name));
+    // ✅ optionnelle
+    final iAmPm = _findHeaderIndex(header, ['AM/PM', 'AM PM', 'AMPM'], required: false);
 
-    // Colonnes attendues
-    final iPlate = idx("Immat");
-    final iBrand = idx("MARQUE");
-    final iModel = idx("Modele");
-    final iSite = idx("Site");
-    final iEntry = idx("Entrée");
-    final iAmPm = idx("AM/PM");
-    final iForecast = idx("Forecast Ventes");
+    final iForecast = _findHeaderIndex(
+      header,
+      ['Forecast Ventes', 'Forecast', 'Ventes', 'Catégorie ventes', 'Categorie ventes'],
+      required: false,
+    );
 
-    final iPhoto = idx("AOS");
-    final iDamage = idx("Proovstation");
-    final iEquip = idx("Equipment");
-    final iCar = idx("CarCheck");
+    final iPhoto = _findHeaderIndex(header, ['AOS', 'Photos', 'Photo']);
+    final iDamage = _findHeaderIndex(header, ['Proovstation', 'Proov', 'Dégâts', 'Degats'], required: false);
+    final iEquip = _findHeaderIndex(header, ['Equipment', 'Equipement', 'Équipement'], required: false);
+    final iCar = _findHeaderIndex(header, ['CarCheck', 'Car Check'], required: false);
 
-    final iRvoDamage = idx("RVO Dégâts");
-    final iRvoEquip = idx("RVO Equpmt");
+    final iRvoDamage = _findHeaderIndex(
+      header,
+      ['RVO Dégâts', 'RVO Degats', 'RVO dégâts', 'RVO degats'],
+      required: false,
+    );
+    final iRvoEquip = _findHeaderIndex(
+      header,
+      ['RVO Equpmt', 'RVO Equipment', 'RVO Equipement'],
+      required: false,
+    );
 
-    final iAviloo = idx("AVILOO");
-
-    final requiredIdx = [
-      iPlate,
-      iBrand,
-      iModel,
-      iSite,
-      iEntry,
-      iAmPm,
-      iForecast,
-      iPhoto,
-      iDamage,
-      iEquip,
-      iCar,
-      iRvoDamage,
-      iRvoEquip,
-      iAviloo,
-    ];
-
-    if (requiredIdx.any((i) => i < 0)) {
-      throw Exception(
-        "Colonnes KPI introuvables. Vérifie les en-têtes exacts :\n"
-            "Immat, MARQUE, Modele, Site, Entrée, AM/PM, Forecast Ventes,\n"
-            "AOS, Proovstation, Equipment, CarCheck, RVO Dégâts, RVO Equpmt, AVILOO",
-      );
-    }
+    final iAviloo = _findHeaderIndex(header, ['AVILOO', 'Aviloo'], required: false);
 
     final out = <Map<String, dynamic>>[];
 
@@ -385,29 +429,29 @@ class _SettingsPageState extends State<SettingsPage> {
       final row = sheet.rows[r];
       if (row.isEmpty) continue;
 
-      final plateRaw = _cellString(row[iPlate]?.value);
+      final plateRaw = _cellString(_cellAt(row, iPlate)?.value);
       if (plateRaw.isEmpty) continue;
 
-      final brand = _cellString(row[iBrand]?.value);
-      final model = _cellString(row[iModel]?.value);
-      final site = _cellString(row[iSite]?.value);
-      final ampm = _cellString(row[iAmPm]?.value);
-      final forecast = _cellString(row[iForecast]?.value);
-      final opAviloo = _parseOp(row[iAviloo]?.value);
+      final brand = _cellString(_cellAt(row, iBrand)?.value);
+      final model = _cellString(_cellAt(row, iModel)?.value);
+      final site = _cellString(_cellAt(row, iSite)?.value);
+      final ampm = _cellString(_cellAt(row, iAmPm)?.value); // optionnel -> vide si absent
+      final forecast = _cellString(_cellAt(row, iForecast)?.value);
+      final opAviloo = _parseOp(_cellAt(row, iAviloo)?.value);
 
-      // ✅ IMPORTANT: on lit la valeur brute (DateTime possible)
-      final entryIso = _toIsoDateDynamic(row[iEntry]?.value);
+      // ✅ IMPORTANT: support DateTime / texte / nombre
+      final entryIso = _toIsoDateDynamic(_cellAt(row, iEntry)?.value);
 
-      // Opérations normales
-      final opPhoto = _parseOp(row[iPhoto]?.value);
-      final opCar = _parseOp(row[iCar]?.value);
+      // Colonnes opérationnelles (certaines peuvent être absentes)
+      final opPhoto = _parseOp(_cellAt(row, iPhoto)?.value);
+      final opCar = _parseOp(_cellAt(row, iCar)?.value);
 
-      final opDamageNormal = _parseOp(row[iDamage]?.value);
-      final opEquipNormal = _parseOp(row[iEquip]?.value);
+      final opDamageNormal = _parseOp(_cellAt(row, iDamage)?.value);
+      final opEquipNormal = _parseOp(_cellAt(row, iEquip)?.value);
 
       // RVO : si RVO a une info (A FAIRE ou date), il remplace la colonne normale
-      final opDamageRvo = _parseOp(row[iRvoDamage]?.value);
-      final opEquipRvo = _parseOp(row[iRvoEquip]?.value);
+      final opDamageRvo = _parseOp(_cellAt(row, iRvoDamage)?.value);
+      final opEquipRvo = _parseOp(_cellAt(row, iRvoEquip)?.value);
 
       final useRvoDamage = opDamageRvo.required || opDamageRvo.doneIso != null;
       final useRvoEquip = opEquipRvo.required || opEquipRvo.doneIso != null;
@@ -454,50 +498,32 @@ class _SettingsPageState extends State<SettingsPage> {
     if (rows.isEmpty) return [];
 
     final header = rows.first.map((e) => e.toString().trim()).toList();
-    int idx(String name) => header.indexWhere((h) => h.toLowerCase() == name.toLowerCase());
 
-    final iPlate = idx("Immat");
-    final iBrand = idx("MARQUE");
-    final iModel = idx("Modele");
-    final iSite = idx("Site");
-    final iEntry = idx("Entrée");
-    final iAmPm = idx("AM/PM");
-    final iForecast = idx("Forecast Ventes");
+    // ✅ Colonnes souples
+    final iPlate = _findHeaderIndex(header, ['Immat', 'Immatriculation', 'Plaque']);
+    final iBrand = _findHeaderIndex(header, ['MARQUE', 'Marque']);
+    final iModel = _findHeaderIndex(header, ['Modele', 'Modèle', 'Model']);
+    final iSite = _findHeaderIndex(header, ['Site']);
+    final iEntry = _findHeaderIndex(header, ['Entrée', 'Entree', 'Date entrée', 'Date entree']);
 
-    final iPhoto = idx("AOS");
-    final iDamage = idx("Proovstation");
-    final iEquip = idx("Equipment");
-    final iCar = idx("CarCheck");
+    // ✅ optionnelle
+    final iAmPm = _findHeaderIndex(header, ['AM/PM', 'AM PM', 'AMPM'], required: false);
 
-    final iRvoDamage = idx("RVO Dégâts");
-    final iRvoEquip = idx("RVO Equpmt");
+    final iForecast = _findHeaderIndex(
+      header,
+      ['Forecast Ventes', 'Forecast', 'Ventes', 'Catégorie ventes', 'Categorie ventes'],
+      required: false,
+    );
 
-    final iAviloo = idx("AVILOO");
+    final iPhoto = _findHeaderIndex(header, ['AOS', 'Photos', 'Photo']);
+    final iDamage = _findHeaderIndex(header, ['Proovstation', 'Proov', 'Dégâts', 'Degats'], required: false);
+    final iEquip = _findHeaderIndex(header, ['Equipment', 'Equipement', 'Équipement'], required: false);
+    final iCar = _findHeaderIndex(header, ['CarCheck', 'Car Check'], required: false);
 
-    final requiredIdx = [
-      iPlate,
-      iBrand,
-      iModel,
-      iSite,
-      iEntry,
-      iAmPm,
-      iForecast,
-      iPhoto,
-      iDamage,
-      iEquip,
-      iCar,
-      iRvoDamage,
-      iRvoEquip,
-      iAviloo,
-    ];
+    final iRvoDamage = _findHeaderIndex(header, ['RVO Dégâts', 'RVO Degats'], required: false);
+    final iRvoEquip = _findHeaderIndex(header, ['RVO Equpmt', 'RVO Equipment', 'RVO Equipement'], required: false);
 
-    if (requiredIdx.any((i) => i < 0)) {
-      throw Exception(
-        "Colonnes KPI introuvables dans le CSV. En-têtes attendus :\n"
-            "Immat, MARQUE, Modele, Site, Entrée, AM/PM, Forecast Ventes,\n"
-            "AOS, Proovstation, Equipment, CarCheck, RVO Dégâts, RVO Equpmt, AVILOO",
-      );
-    }
+    final iAviloo = _findHeaderIndex(header, ['AVILOO', 'Aviloo'], required: false);
 
     final out = <Map<String, dynamic>>[];
 
@@ -505,29 +531,29 @@ class _SettingsPageState extends State<SettingsPage> {
       final row = rows[r];
       if (row.length <= iPlate) continue;
 
-      final plateRaw = row[iPlate].toString().trim();
+      final plateRaw = _cellString(_cellAt(row, iPlate));
       if (plateRaw.isEmpty) continue;
 
-      final brand = row[iBrand].toString().trim();
-      final model = row[iModel].toString().trim();
-      final site = row[iSite].toString().trim();
-      final ampm = row[iAmPm].toString().trim();
-      final forecast = row[iForecast].toString().trim();
-      final aviloo = row[iAviloo].toString().trim();
+      final brand = _cellString(_cellAt(row, iBrand));
+      final model = _cellString(_cellAt(row, iModel));
+      final site = _cellString(_cellAt(row, iSite));
+      final ampm = _cellString(_cellAt(row, iAmPm));
+      final forecast = _cellString(_cellAt(row, iForecast));
+      final aviloo = _cellString(_cellAt(row, iAviloo));
 
       // ✅ CSV: valeur directe (pas de .value)
-      final entryIso = _toIsoDateDynamic(row[iEntry]);
+      final entryIso = _toIsoDateDynamic(_cellAt(row, iEntry));
 
-      final opPhoto = _parseOp(row[iPhoto]);
-      final opCar = _parseOp(row[iCar]);
+      final opPhoto = _parseOp(_cellAt(row, iPhoto));
+      final opCar = _parseOp(_cellAt(row, iCar));
 
-      final opDamageNormal = _parseOp(row[iDamage]);
-      final opEquipNormal = _parseOp(row[iEquip]);
+      final opDamageNormal = _parseOp(_cellAt(row, iDamage));
+      final opEquipNormal = _parseOp(_cellAt(row, iEquip));
 
-      final opDamageRvo = _parseOp(row[iRvoDamage]);
-      final opEquipRvo = _parseOp(row[iRvoEquip]);
+      final opDamageRvo = _parseOp(_cellAt(row, iRvoDamage));
+      final opEquipRvo = _parseOp(_cellAt(row, iRvoEquip));
 
-      final opAviloo = _parseOp(row[iAviloo]);
+      final opAviloo = _parseOp(_cellAt(row, iAviloo));
 
       final useRvoDamage = opDamageRvo.required || opDamageRvo.doneIso != null;
       final useRvoEquip = opEquipRvo.required || opEquipRvo.doneIso != null;
@@ -551,7 +577,6 @@ class _SettingsPageState extends State<SettingsPage> {
         'required_equipment': finalEquip.required,
         'required_carcheck': opCar.required,
         'required_aviloo': opAviloo.required,
-
 
         'photo_done_date': opPhoto.doneIso,
         'damage_done_date': finalDamage.doneIso,
@@ -802,7 +827,8 @@ class _SettingsPageState extends State<SettingsPage> {
                           "Règles :\n"
                           "- \"A FAIRE\" => opération requise\n"
                           "- une date => opération déjà faite (stockée)\n"
-                          "- RVO remplace Proovstation/Equipment si RVO contient A FAIRE ou une date",
+                          "- RVO remplace Proovstation/Equipment si RVO contient A FAIRE ou une date\n\n"
+                          "✅ L'import est maintenant plus tolérant : ordre libre, noms proches acceptés, AM/PM optionnel.",
                       style: TextStyle(color: _muted, fontWeight: FontWeight.w700, fontSize: 12, height: 1.35),
                     ),
                   ],
