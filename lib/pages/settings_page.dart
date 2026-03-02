@@ -1,4 +1,9 @@
-// settings_page.dart
+// settings_page.dart (version "moins stricte" + debug clair)
+// ✅ Supporte fichiers KPI très variables (header pas en 1ère ligne, colonnes manquantes)
+// ✅ Ne dépend PAS de excel.tables (utilise excel.sheets)
+// ✅ N'échoue pas si certaines colonnes sont absentes (elles deviennent optionnelles)
+// ✅ Affiche la vraie erreur Supabase + trouve la ligne fautive si un batch échoue
+
 import 'dart:convert';
 
 import 'package:csv/csv.dart';
@@ -8,10 +13,6 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
-/// Structure renvoyée par une cellule d'opération :
-/// - required : true si "A FAIRE"
-/// - doneIso  : date ISO YYYY-MM-DD si la cellule contient une date (donc déjà fait)
-/// - hasSomething : la cellule contient une info ("A FAIRE" ou une date ou autre valeur)
 class _Op {
   final bool required;
   final String? doneIso; // "YYYY-MM-DD"
@@ -148,7 +149,7 @@ class _SettingsPageState extends State<SettingsPage> {
       }
 
       if (rows.isEmpty) {
-        throw Exception("Aucune ligne KPI détectée.");
+        throw Exception("Aucune ligne KPI détectée (header ou colonnes non reconnues).");
       }
 
       final supabase = Supabase.instance.client;
@@ -158,9 +159,32 @@ class _SettingsPageState extends State<SettingsPage> {
 
       setState(() => _status = "Insertion ${rows.length} lignes…");
       const batchSize = 200;
+
       for (var i = 0; i < rows.length; i += batchSize) {
         final batch = rows.sublist(i, (i + batchSize).clamp(0, rows.length));
-        await supabase.from('kpi_vehicles').insert(batch);
+
+        try {
+          await supabase.from('kpi_vehicles').insert(batch);
+        } catch (e) {
+          // Si un batch échoue, on tente ligne par ligne pour trouver LA ligne fautive
+          setState(() => _status =
+              "❌ Batch en erreur (lignes ${i + 1} -> ${i + batch.length}). Recherche de la ligne fautive…");
+
+          for (var j = 0; j < batch.length; j++) {
+            try {
+              await supabase.from('kpi_vehicles').insert(batch[j]);
+            } catch (e2) {
+              final bad = batch[j];
+              throw Exception(
+                "Erreur insert à la ligne ${i + j + 1} : $e2\n"
+                "plate=${bad['plate']} entry_time=${bad['entry_time']}\n"
+                "row=$bad",
+              );
+            }
+          }
+
+          rethrow;
+        }
       }
 
       setState(() {
@@ -173,13 +197,20 @@ class _SettingsPageState extends State<SettingsPage> {
         SnackBar(content: Text("Import réussi (${rows.length} véhicules)")),
       );
     } catch (e) {
+      String msg = e.toString();
+
+      // Erreurs Supabase plus lisibles
+      if (e is PostgrestException) {
+        msg = "PostgrestException: ${e.message}\ncode: ${e.code}\ndetails: ${e.details}\nhint: ${e.hint}";
+      }
+
       setState(() {
         _importing = false;
-        _status = "❌ Erreur import : $e";
+        _status = "❌ Erreur import :\n$msg";
       });
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Erreur import : $e")),
+        SnackBar(content: Text("Erreur import : $msg")),
       );
     }
   }
@@ -188,28 +219,15 @@ class _SettingsPageState extends State<SettingsPage> {
 
   bool _isAFaire(dynamic v) {
     var s = (v ?? '').toString();
-
-    // normalisation Excel: espaces insécables, tabs, retours, multi-espaces
-    s = s.replaceAll('\u00A0', ' '); // NBSP -> espace normal
-    s = s.replaceAll(RegExp(r'\s+'), ' '); // compact
+    s = s.replaceAll('\u00A0', ' ');
+    s = s.replaceAll(RegExp(r'\s+'), ' ');
     s = s.trim().toUpperCase();
-
-    // accepte A FAIRE, AFAIRE, A  FAIRE, A-FAIRE, etc.
     return RegExp(r'^A[\s\-]*FAIRE$').hasMatch(s);
   }
 
-  /// Retourne une date ISO "YYYY-MM-DD" ou null.
-  /// Supporte:
-  /// - DateTime (Excel peut renvoyer un DateTime)
-  /// - nombre (serial date Excel)
-  /// - "YYYY-MM-DD"
-  /// - "DD/MM/YYYY"
-  /// - "YYYY-MM-DD HH:MM:SS"
-  /// - "DD/MM/YYYY HH:MM(:SS)"
   String? _toIsoDateDynamic(dynamic input) {
     if (input == null) return null;
 
-    // 1) Si déjà DateTime
     if (input is DateTime) {
       final yyyy = input.year.toString().padLeft(4, '0');
       final mm = input.month.toString().padLeft(2, '0');
@@ -217,7 +235,6 @@ class _SettingsPageState extends State<SettingsPage> {
       return "$yyyy-$mm-$dd";
     }
 
-    // 2) Si nombre Excel (serial date)
     if (input is num) {
       final base = DateTime(1899, 12, 30);
       final dt = base.add(Duration(days: input.floor()));
@@ -227,18 +244,14 @@ class _SettingsPageState extends State<SettingsPage> {
       return "$yyyy-$mm-$dd";
     }
 
-    // 3) Texte
     final s0 = input.toString().trim();
     if (s0.isEmpty) return null;
 
-    // Supprime l'heure si présente
     final s = s0.split(' ').first;
 
-    // Format ISO direct
     final iso = RegExp(r'^\d{4}-\d{2}-\d{2}$');
     if (iso.hasMatch(s)) return s;
 
-    // Format FR DD/MM/YYYY
     final fr = RegExp(r'^(\d{1,2})\/(\d{1,2})\/(\d{4})$');
     final m = fr.firstMatch(s);
     if (m != null) {
@@ -248,7 +261,7 @@ class _SettingsPageState extends State<SettingsPage> {
       return "$yyyy-$mm-$dd";
     }
 
-    // Dernière tentative : parse automatique
+    // Dernière tentative
     try {
       final dt = DateTime.parse(s0);
       final yyyy = dt.year.toString().padLeft(4, '0');
@@ -318,13 +331,11 @@ class _SettingsPageState extends State<SettingsPage> {
     final normalizedHeader = header.map(_normalizeHeader).toList();
     final normalizedAliases = aliases.map(_normalizeHeader).toList();
 
-    // 1) match exact
     for (final alias in normalizedAliases) {
       final idx = normalizedHeader.indexOf(alias);
       if (idx >= 0) return idx;
     }
 
-    // 2) match partiel
     for (var i = 0; i < normalizedHeader.length; i++) {
       final h = normalizedHeader[i];
       for (final alias in normalizedAliases) {
@@ -345,13 +356,9 @@ class _SettingsPageState extends State<SettingsPage> {
     return row[index];
   }
 
-  // ============================================================
-  // ✅ FIX PRINCIPAL : ne plus dépendre de excel.tables
-  // ============================================================
+  // ===== Détection feuille + header ligne =====
 
-  /// Cherche la ligne d'en-tête dans les N premières lignes (utile si Excel a un titre au dessus).
-  /// Retourne l'index de la ligne d'en-tête, ou 0 par défaut.
-  int _findHeaderRowIndex(ex.Sheet sheet, {int scanRows = 12}) {
+  int _findHeaderRowIndexInSheet(ex.Sheet sheet, {int scanRows = 15}) {
     final limit = sheet.rows.length < scanRows ? sheet.rows.length : scanRows;
     int bestIdx = 0;
     int bestScore = -1;
@@ -370,9 +377,9 @@ class _SettingsPageState extends State<SettingsPage> {
 
       final hasPlate = hasAny(['immat', 'immatriculation', 'plaque']);
       final hasBrand = hasAny(['marque']);
-      final hasModel = hasAny(['modele', 'modèle', 'model']);
-      final hasEntry = hasAny(['entree', 'entrée', 'date entree', 'date d entree']);
-      final hasOps = hasAny(['aos', 'proovstation', 'equipment', 'carcheck', 'aviloo', 'rvo']);
+      final hasModel = hasAny(['modele', 'model', 'modèle']);
+      final hasEntry = hasAny(['entree', 'entrée', "date d entree", "date d'entrée", 'date entree', 'date entrée']);
+      final hasOps = hasAny(['aos', 'photo', 'photos', 'proov', 'proovstation', 'equipment', 'equipement', 'carcheck', 'aviloo', 'rvo']);
 
       int score = 0;
       if (hasPlate) score++;
@@ -386,22 +393,15 @@ class _SettingsPageState extends State<SettingsPage> {
         bestIdx = r;
       }
 
-      if (score >= 4) return r; // assez fiable
+      if (score >= 4) return r;
     }
 
-    return bestIdx; // fallback
+    return bestIdx;
   }
 
-  /// ✅ Choisit la feuille KPI automatiquement (détection souple) via excel.sheets.
   ex.Sheet? _pickKpiSheet(ex.Excel excel) {
     final sheets = excel.sheets;
     if (sheets.isEmpty) return null;
-
-    // DEBUG (tu peux enlever après)
-    // ignore: avoid_print
-    print("SHEETS: ${sheets.keys.toList()}");
-    // ignore: avoid_print
-    print("TABLES: ${excel.tables.keys.toList()}");
 
     ex.Sheet? best;
     int bestScore = -1;
@@ -410,23 +410,21 @@ class _SettingsPageState extends State<SettingsPage> {
       final sheet = entry.value;
       if (sheet.rows.isEmpty) continue;
 
-      // on cherche la meilleure ligne d'en-tête (pas forcément la 1ère)
-      final headerRowIdx = _findHeaderRowIndex(sheet);
+      final headerRowIdx = _findHeaderRowIndexInSheet(sheet);
       final headerRow = sheet.rows[headerRowIdx];
-
       final header = headerRow.map((c) => _cellString(c?.value)).toList();
       final normalized = header.map(_normalizeHeader).toList();
 
       bool hasAny(List<String> aliases) {
-        final aliasNorm = aliases.map(_normalizeHeader).toSet();
-        return normalized.any(aliasNorm.contains);
+        final set = aliases.map(_normalizeHeader).toSet();
+        return normalized.any(set.contains);
       }
 
       final hasPlate = hasAny(['immat', 'immatriculation', 'plaque']);
       final hasBrand = hasAny(['marque']);
-      final hasModel = hasAny(['modele', 'modèle', 'model']);
-      final hasEntry = hasAny(['entree', 'entrée', 'date entree', 'date d entree']);
-      final hasOps = hasAny(['aos', 'proovstation', 'equipment', 'carcheck', 'aviloo', 'rvo']);
+      final hasModel = hasAny(['modele', 'model', 'modèle']);
+      final hasEntry = hasAny(['entree', 'entrée', "date d entree", "date d'entrée", 'date entree', 'date entrée']);
+      final hasOps = hasAny(['aos', 'photo', 'photos', 'proov', 'proovstation', 'equipment', 'equipement', 'carcheck', 'aviloo', 'rvo']);
 
       int score = 0;
       if (hasPlate) score++;
@@ -440,64 +438,72 @@ class _SettingsPageState extends State<SettingsPage> {
         best = sheet;
       }
 
-      if (score == 5) return sheet; // parfait
+      if (score == 5) return sheet;
     }
 
     return best;
   }
 
+  // ===== XLSX parsing (tolérant) =====
   List<Map<String, dynamic>> _parseXlsx(List<int> bytes, String kpiDate) {
     final excel = ex.Excel.decodeBytes(bytes);
 
     final sheet = _pickKpiSheet(excel);
     if (sheet == null || sheet.rows.isEmpty) return [];
 
-    // ✅ Header pas forcément ligne 0
-    final headerRowIdx = _findHeaderRowIndex(sheet);
+    final headerRowIdx = _findHeaderRowIndexInSheet(sheet);
     final headerRow = sheet.rows[headerRowIdx];
-
     final header = headerRow.map((c) => _cellString(c?.value)).toList();
 
-    // ✅ Colonnes souples (ordre libre, noms tolérés)
-    final iPlate = _findHeaderIndex(header, ['Immat', 'Immatriculation', 'Plaque']);
-    final iBrand = _findHeaderIndex(header, ['MARQUE', 'Marque']);
-    final iModel = _findHeaderIndex(header, ['Modele', 'Modèle', 'Model']);
-    final iSite = _findHeaderIndex(header, ['Site']);
-    final iEntry = _findHeaderIndex(header, ['Entrée', 'Entree', 'Date entrée', 'Date entree']);
+    // ✅ Plaque + Marque + Modèle : essentiels (mais alias très larges)
+    final iPlate = _findHeaderIndex(header, ['Immat', 'Immatriculation', 'Plaque', 'Plate']);
+    final iBrand = _findHeaderIndex(header, ['Marque', 'MARQUE', 'Brand'], required: false);
+    final iModel = _findHeaderIndex(header, ['Modele', 'Modèle', 'Model'], required: false);
 
-    // ✅ optionnelle
+    // ✅ Tout le reste optionnel (moins strict)
+    final iSite = _findHeaderIndex(
+      header,
+      ['Site', 'Site entree', 'Site d entree', 'Lieu', 'Emplacement', 'Location'],
+      required: false,
+    );
+
+    final iEntry = _findHeaderIndex(
+      header,
+      [
+        'Entrée',
+        'Entree',
+        "Date d'entrée",
+        "Date d entree",
+        'Date entrée',
+        'Date entree',
+        'Entrée sur site',
+        'Entree sur site',
+        'Date entree site',
+        'Date entrée site',
+      ],
+      required: false,
+    );
+
     final iAmPm = _findHeaderIndex(header, ['AM/PM', 'AM PM', 'AMPM'], required: false);
 
     final iForecast = _findHeaderIndex(
       header,
-      ['Forecast Ventes', 'Forecast', 'Ventes', 'Catégorie ventes', 'Categorie ventes'],
+      ['Forecast Ventes', 'Forecast', 'Ventes', 'Catégorie ventes', 'Categorie ventes', 'Categorie', 'Catégorie'],
       required: false,
     );
 
-    final iPhoto = _findHeaderIndex(header, ['AOS', 'Photos', 'Photo']);
-    final iDamage = _findHeaderIndex(header, ['Proovstation', 'Proov', 'Dégâts', 'Degats'], required: false);
-    final iEquip = _findHeaderIndex(header, ['Equipment', 'Equipement', 'Équipement'], required: false);
-    final iCar = _findHeaderIndex(header, ['CarCheck', 'Car Check'], required: false);
-
-    final iRvoDamage = _findHeaderIndex(
-      header,
-      ['RVO Dégâts', 'RVO Degats', 'RVO dégâts', 'RVO degats'],
-      required: false,
-    );
-    final iRvoEquip = _findHeaderIndex(
-      header,
-      ['RVO Equpmt', 'RVO Equipment', 'RVO Equipement'],
-      required: false,
-    );
+    final iPhoto = _findHeaderIndex(header, ['AOS', 'Photos', 'Photo', 'Photocom', 'Photo commercial'], required: false);
+    final iDamage = _findHeaderIndex(header, ['Proovstation', 'Proov', 'Dégâts', 'Degats', 'Dommages', 'Damage'], required: false);
+    final iEquip = _findHeaderIndex(header, ['Equipment', 'Equipement', 'Équipement', 'Equip', 'Equipment check'], required: false);
+    final iCar = _findHeaderIndex(header, ['CarCheck', 'Car Check', 'Carcheck'], required: false);
 
     final iAviloo = _findHeaderIndex(header, ['AVILOO', 'Aviloo'], required: false);
 
-    // (Optionnel) VIN : on le lit si présent, sans bloquer
-    final iVin = _findHeaderIndex(header, ['VIN'], required: false);
+    final iRvoDamage = _findHeaderIndex(header, ['RVO Dégâts', 'RVO Degats', 'RVO dégâts', 'RVO degats', 'RVO dommages'], required: false);
+    final iRvoEquip = _findHeaderIndex(header, ['RVO Equpmt', 'RVO Equipment', 'RVO Equipement', 'RVO equip'], required: false);
 
     final out = <Map<String, dynamic>>[];
 
-    // ⚠️ On commence après la ligne header
     for (var r = headerRowIdx + 1; r < sheet.rows.length; r++) {
       final row = sheet.rows[r];
       if (row.isEmpty) continue;
@@ -505,28 +511,23 @@ class _SettingsPageState extends State<SettingsPage> {
       final plateRaw = _cellString(_cellAt(row, iPlate)?.value);
       if (plateRaw.isEmpty) continue;
 
-      final brand = _cellString(_cellAt(row, iBrand)?.value);
-      final model = _cellString(_cellAt(row, iModel)?.value);
-      final site = _cellString(_cellAt(row, iSite)?.value);
-      final ampm = _cellString(_cellAt(row, iAmPm)?.value); // optionnel -> vide si absent
-      final forecast = _cellString(_cellAt(row, iForecast)?.value);
-      final opAviloo = _parseOp(_cellAt(row, iAviloo)?.value);
+      final brand = iBrand >= 0 ? _cellString(_cellAt(row, iBrand)?.value) : '';
+      final model = iModel >= 0 ? _cellString(_cellAt(row, iModel)?.value) : '';
+      final site = iSite >= 0 ? _cellString(_cellAt(row, iSite)?.value) : '';
+      final ampm = iAmPm >= 0 ? _cellString(_cellAt(row, iAmPm)?.value) : '';
+      final forecast = iForecast >= 0 ? _cellString(_cellAt(row, iForecast)?.value) : '';
 
-      final vin = _cellString(_cellAt(row, iVin)?.value);
+      final entryIso = iEntry >= 0 ? _toIsoDateDynamic(_cellAt(row, iEntry)?.value) : null;
 
-      // ✅ IMPORTANT: support DateTime / texte / nombre
-      final entryIso = _toIsoDateDynamic(_cellAt(row, iEntry)?.value);
+      final opPhoto = iPhoto >= 0 ? _parseOp(_cellAt(row, iPhoto)?.value) : const _Op(required: false, doneIso: null, hasSomething: false);
+      final opCar = iCar >= 0 ? _parseOp(_cellAt(row, iCar)?.value) : const _Op(required: false, doneIso: null, hasSomething: false);
+      final opAviloo = iAviloo >= 0 ? _parseOp(_cellAt(row, iAviloo)?.value) : const _Op(required: false, doneIso: null, hasSomething: false);
 
-      // Colonnes opérationnelles (certaines peuvent être absentes)
-      final opPhoto = _parseOp(_cellAt(row, iPhoto)?.value);
-      final opCar = _parseOp(_cellAt(row, iCar)?.value);
+      final opDamageNormal = iDamage >= 0 ? _parseOp(_cellAt(row, iDamage)?.value) : const _Op(required: false, doneIso: null, hasSomething: false);
+      final opEquipNormal = iEquip >= 0 ? _parseOp(_cellAt(row, iEquip)?.value) : const _Op(required: false, doneIso: null, hasSomething: false);
 
-      final opDamageNormal = _parseOp(_cellAt(row, iDamage)?.value);
-      final opEquipNormal = _parseOp(_cellAt(row, iEquip)?.value);
-
-      // RVO : si RVO a une info (A FAIRE ou date), il remplace la colonne normale
-      final opDamageRvo = _parseOp(_cellAt(row, iRvoDamage)?.value);
-      final opEquipRvo = _parseOp(_cellAt(row, iRvoEquip)?.value);
+      final opDamageRvo = iRvoDamage >= 0 ? _parseOp(_cellAt(row, iRvoDamage)?.value) : const _Op(required: false, doneIso: null, hasSomething: false);
+      final opEquipRvo = iRvoEquip >= 0 ? _parseOp(_cellAt(row, iRvoEquip)?.value) : const _Op(required: false, doneIso: null, hasSomething: false);
 
       final useRvoDamage = opDamageRvo.required || opDamageRvo.doneIso != null;
       final useRvoEquip = opEquipRvo.required || opEquipRvo.doneIso != null;
@@ -537,29 +538,25 @@ class _SettingsPageState extends State<SettingsPage> {
       out.add({
         'kpi_date': kpiDate,
         'plate': plateRaw.toUpperCase(),
-        'vin': vin.isEmpty ? null : vin, // ✅ n'empêche pas l'insert si colonne existe côté DB
         'brand': brand,
         'model': model,
         'site': site,
         'am_pm': ampm,
         'forecast_sales': forecast,
-        'required_aviloo': opAviloo.required,
-        'aviloo_done_date': opAviloo.doneIso,
         'entry_time': entryIso,
 
-        // requirements
         'required_photo': opPhoto.required,
         'required_damage': finalDamage.required,
         'required_equipment': finalEquip.required,
         'required_carcheck': opCar.required,
+        'required_aviloo': opAviloo.required,
 
-        // done dates (si date dans la cellule)
         'photo_done_date': opPhoto.doneIso,
         'damage_done_date': finalDamage.doneIso,
         'equipment_done_date': finalEquip.doneIso,
         'carcheck_done_date': opCar.doneIso,
+        'aviloo_done_date': opAviloo.doneIso,
 
-        // sources
         'damage_source': useRvoDamage ? 'rvo' : 'proovstation',
         'equipment_source': useRvoEquip ? 'rvo' : 'equipment',
       });
@@ -568,15 +565,16 @@ class _SettingsPageState extends State<SettingsPage> {
     return out;
   }
 
+  // ===== CSV parsing (tolérant) =====
   List<Map<String, dynamic>> _parseCsv(List<int> bytes, String kpiDate) {
     final text = utf8.decode(bytes);
     final rows = const CsvToListConverter().convert(text, eol: '\n');
     if (rows.isEmpty) return [];
 
-    // Cherche un header dans les premières lignes (CSV peut aussi avoir un titre)
+    // détecte header dans les premières lignes
     int headerRowIdx = 0;
     int bestScore = -1;
-    final scan = rows.length < 12 ? rows.length : 12;
+    final scan = rows.length < 15 ? rows.length : 15;
 
     for (var r = 0; r < scan; r++) {
       final header = rows[r].map((e) => e.toString().trim()).toList();
@@ -587,11 +585,11 @@ class _SettingsPageState extends State<SettingsPage> {
         return normalized.any(set.contains);
       }
 
-      final hasPlate = hasAny(['immat', 'immatriculation', 'plaque']);
-      final hasBrand = hasAny(['marque']);
-      final hasModel = hasAny(['modele', 'modèle', 'model']);
-      final hasEntry = hasAny(['entree', 'entrée', 'date entree', 'date d entree']);
-      final hasOps = hasAny(['aos', 'proovstation', 'equipment', 'carcheck', 'aviloo', 'rvo']);
+      final hasPlate = hasAny(['immat', 'immatriculation', 'plaque', 'plate']);
+      final hasBrand = hasAny(['marque', 'brand']);
+      final hasModel = hasAny(['modele', 'model', 'modèle']);
+      final hasEntry = hasAny(['entree', 'entrée', "date d entree", "date d'entrée", 'date entree', 'date entrée']);
+      final hasOps = hasAny(['aos', 'photo', 'photos', 'proov', 'proovstation', 'equipment', 'equipement', 'carcheck', 'aviloo', 'rvo']);
 
       int score = 0;
       if (hasPlate) score++;
@@ -605,40 +603,55 @@ class _SettingsPageState extends State<SettingsPage> {
         headerRowIdx = r;
       }
 
-      if (score >= 4) {
-        headerRowIdx = r;
-        break;
-      }
+      if (score >= 4) break;
     }
 
     final header = rows[headerRowIdx].map((e) => e.toString().trim()).toList();
 
-    // ✅ Colonnes souples
-    final iPlate = _findHeaderIndex(header, ['Immat', 'Immatriculation', 'Plaque']);
-    final iBrand = _findHeaderIndex(header, ['MARQUE', 'Marque']);
-    final iModel = _findHeaderIndex(header, ['Modele', 'Modèle', 'Model']);
-    final iSite = _findHeaderIndex(header, ['Site']);
-    final iEntry = _findHeaderIndex(header, ['Entrée', 'Entree', 'Date entrée', 'Date entree']);
+    final iPlate = _findHeaderIndex(header, ['Immat', 'Immatriculation', 'Plaque', 'Plate']);
+    final iBrand = _findHeaderIndex(header, ['Marque', 'MARQUE', 'Brand'], required: false);
+    final iModel = _findHeaderIndex(header, ['Modele', 'Modèle', 'Model'], required: false);
 
-    // ✅ optionnelle
+    final iSite = _findHeaderIndex(
+      header,
+      ['Site', 'Site entree', 'Site d entree', 'Lieu', 'Emplacement', 'Location'],
+      required: false,
+    );
+
+    final iEntry = _findHeaderIndex(
+      header,
+      [
+        'Entrée',
+        'Entree',
+        "Date d'entrée",
+        "Date d entree",
+        'Date entrée',
+        'Date entree',
+        'Entrée sur site',
+        'Entree sur site',
+        'Date entree site',
+        'Date entrée site',
+      ],
+      required: false,
+    );
+
     final iAmPm = _findHeaderIndex(header, ['AM/PM', 'AM PM', 'AMPM'], required: false);
 
     final iForecast = _findHeaderIndex(
       header,
-      ['Forecast Ventes', 'Forecast', 'Ventes', 'Catégorie ventes', 'Categorie ventes'],
+      ['Forecast Ventes', 'Forecast', 'Ventes', 'Catégorie ventes', 'Categorie ventes', 'Categorie', 'Catégorie'],
       required: false,
     );
 
-    final iPhoto = _findHeaderIndex(header, ['AOS', 'Photos', 'Photo']);
-    final iDamage = _findHeaderIndex(header, ['Proovstation', 'Proov', 'Dégâts', 'Degats'], required: false);
-    final iEquip = _findHeaderIndex(header, ['Equipment', 'Equipement', 'Équipement'], required: false);
-    final iCar = _findHeaderIndex(header, ['CarCheck', 'Car Check'], required: false);
-
-    final iRvoDamage = _findHeaderIndex(header, ['RVO Dégâts', 'RVO Degats'], required: false);
-    final iRvoEquip = _findHeaderIndex(header, ['RVO Equpmt', 'RVO Equipment', 'RVO Equipement'], required: false);
+    final iPhoto = _findHeaderIndex(header, ['AOS', 'Photos', 'Photo', 'Photocom', 'Photo commercial'], required: false);
+    final iDamage = _findHeaderIndex(header, ['Proovstation', 'Proov', 'Dégâts', 'Degats', 'Dommages', 'Damage'], required: false);
+    final iEquip = _findHeaderIndex(header, ['Equipment', 'Equipement', 'Équipement', 'Equip', 'Equipment check'], required: false);
+    final iCar = _findHeaderIndex(header, ['CarCheck', 'Car Check', 'Carcheck'], required: false);
 
     final iAviloo = _findHeaderIndex(header, ['AVILOO', 'Aviloo'], required: false);
-    final iVin = _findHeaderIndex(header, ['VIN'], required: false);
+
+    final iRvoDamage = _findHeaderIndex(header, ['RVO Dégâts', 'RVO Degats', 'RVO dégâts', 'RVO degats', 'RVO dommages'], required: false);
+    final iRvoEquip = _findHeaderIndex(header, ['RVO Equpmt', 'RVO Equipment', 'RVO Equipement', 'RVO equip'], required: false);
 
     final out = <Map<String, dynamic>>[];
 
@@ -649,27 +662,23 @@ class _SettingsPageState extends State<SettingsPage> {
       final plateRaw = _cellString(_cellAt(row, iPlate));
       if (plateRaw.isEmpty) continue;
 
-      final brand = _cellString(_cellAt(row, iBrand));
-      final model = _cellString(_cellAt(row, iModel));
-      final site = _cellString(_cellAt(row, iSite));
-      final ampm = _cellString(_cellAt(row, iAmPm));
-      final forecast = _cellString(_cellAt(row, iForecast));
+      final brand = iBrand >= 0 ? _cellString(_cellAt(row, iBrand)) : '';
+      final model = iModel >= 0 ? _cellString(_cellAt(row, iModel)) : '';
+      final site = iSite >= 0 ? _cellString(_cellAt(row, iSite)) : '';
+      final ampm = iAmPm >= 0 ? _cellString(_cellAt(row, iAmPm)) : '';
+      final forecast = iForecast >= 0 ? _cellString(_cellAt(row, iForecast)) : '';
 
-      final vin = _cellString(_cellAt(row, iVin));
+      final entryIso = iEntry >= 0 ? _toIsoDateDynamic(_cellAt(row, iEntry)) : null;
 
-      // ✅ CSV: valeur directe
-      final entryIso = _toIsoDateDynamic(_cellAt(row, iEntry));
+      final opPhoto = iPhoto >= 0 ? _parseOp(_cellAt(row, iPhoto)) : const _Op(required: false, doneIso: null, hasSomething: false);
+      final opCar = iCar >= 0 ? _parseOp(_cellAt(row, iCar)) : const _Op(required: false, doneIso: null, hasSomething: false);
+      final opAviloo = iAviloo >= 0 ? _parseOp(_cellAt(row, iAviloo)) : const _Op(required: false, doneIso: null, hasSomething: false);
 
-      final opPhoto = _parseOp(_cellAt(row, iPhoto));
-      final opCar = _parseOp(_cellAt(row, iCar));
+      final opDamageNormal = iDamage >= 0 ? _parseOp(_cellAt(row, iDamage)) : const _Op(required: false, doneIso: null, hasSomething: false);
+      final opEquipNormal = iEquip >= 0 ? _parseOp(_cellAt(row, iEquip)) : const _Op(required: false, doneIso: null, hasSomething: false);
 
-      final opDamageNormal = _parseOp(_cellAt(row, iDamage));
-      final opEquipNormal = _parseOp(_cellAt(row, iEquip));
-
-      final opDamageRvo = _parseOp(_cellAt(row, iRvoDamage));
-      final opEquipRvo = _parseOp(_cellAt(row, iRvoEquip));
-
-      final opAviloo = _parseOp(_cellAt(row, iAviloo));
+      final opDamageRvo = iRvoDamage >= 0 ? _parseOp(_cellAt(row, iRvoDamage)) : const _Op(required: false, doneIso: null, hasSomething: false);
+      final opEquipRvo = iRvoEquip >= 0 ? _parseOp(_cellAt(row, iRvoEquip)) : const _Op(required: false, doneIso: null, hasSomething: false);
 
       final useRvoDamage = opDamageRvo.required || opDamageRvo.doneIso != null;
       final useRvoEquip = opEquipRvo.required || opEquipRvo.doneIso != null;
@@ -680,13 +689,11 @@ class _SettingsPageState extends State<SettingsPage> {
       out.add({
         'kpi_date': kpiDate,
         'plate': plateRaw.toUpperCase(),
-        'vin': vin.isEmpty ? null : vin,
         'brand': brand,
         'model': model,
         'site': site,
         'am_pm': ampm,
         'forecast_sales': forecast,
-        'aviloo': _cellString(_cellAt(row, iAviloo)),
         'entry_time': entryIso,
 
         'required_photo': opPhoto.required,
@@ -775,8 +782,6 @@ class _SettingsPageState extends State<SettingsPage> {
                     style: const TextStyle(color: _muted),
                   ),
                   const SizedBox(height: 16),
-
-                  // Date KPI
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
@@ -801,10 +806,7 @@ class _SettingsPageState extends State<SettingsPage> {
                       ],
                     ),
                   ),
-
                   const SizedBox(height: 16),
-
-                  // Bouton import
                   SizedBox(
                     width: double.infinity,
                     height: 48,
@@ -828,10 +830,7 @@ class _SettingsPageState extends State<SettingsPage> {
                 ],
               ),
             ),
-
             const SizedBox(height: 16),
-
-            // Status
             Container(
               width: double.infinity,
               padding: const EdgeInsets.all(16),
