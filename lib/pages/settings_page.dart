@@ -1,3 +1,4 @@
+// settings_page.dart
 import 'dart:convert';
 
 import 'package:csv/csv.dart';
@@ -344,16 +345,76 @@ class _SettingsPageState extends State<SettingsPage> {
     return row[index];
   }
 
-  // ✅ Choisit la feuille KPI automatiquement (détection souple)
-  ex.Sheet? _pickKpiSheet(ex.Excel excel) {
-    final tables = excel.tables;
-    if (tables.isEmpty) return null;
+  // ============================================================
+  // ✅ FIX PRINCIPAL : ne plus dépendre de excel.tables
+  // ============================================================
 
-    for (final entry in tables.entries) {
+  /// Cherche la ligne d'en-tête dans les N premières lignes (utile si Excel a un titre au dessus).
+  /// Retourne l'index de la ligne d'en-tête, ou 0 par défaut.
+  int _findHeaderRowIndex(ex.Sheet sheet, {int scanRows = 12}) {
+    final limit = sheet.rows.length < scanRows ? sheet.rows.length : scanRows;
+    int bestIdx = 0;
+    int bestScore = -1;
+
+    for (var r = 0; r < limit; r++) {
+      final row = sheet.rows[r];
+      if (row.isEmpty) continue;
+
+      final header = row.map((c) => _cellString(c?.value)).toList();
+      final normalized = header.map(_normalizeHeader).toList();
+
+      bool hasAny(List<String> aliases) {
+        final set = aliases.map(_normalizeHeader).toSet();
+        return normalized.any(set.contains);
+      }
+
+      final hasPlate = hasAny(['immat', 'immatriculation', 'plaque']);
+      final hasBrand = hasAny(['marque']);
+      final hasModel = hasAny(['modele', 'modèle', 'model']);
+      final hasEntry = hasAny(['entree', 'entrée', 'date entree', 'date d entree']);
+      final hasOps = hasAny(['aos', 'proovstation', 'equipment', 'carcheck', 'aviloo', 'rvo']);
+
+      int score = 0;
+      if (hasPlate) score++;
+      if (hasBrand) score++;
+      if (hasModel) score++;
+      if (hasEntry) score++;
+      if (hasOps) score++;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestIdx = r;
+      }
+
+      if (score >= 4) return r; // assez fiable
+    }
+
+    return bestIdx; // fallback
+  }
+
+  /// ✅ Choisit la feuille KPI automatiquement (détection souple) via excel.sheets.
+  ex.Sheet? _pickKpiSheet(ex.Excel excel) {
+    final sheets = excel.sheets;
+    if (sheets.isEmpty) return null;
+
+    // DEBUG (tu peux enlever après)
+    // ignore: avoid_print
+    print("SHEETS: ${sheets.keys.toList()}");
+    // ignore: avoid_print
+    print("TABLES: ${excel.tables.keys.toList()}");
+
+    ex.Sheet? best;
+    int bestScore = -1;
+
+    for (final entry in sheets.entries) {
       final sheet = entry.value;
       if (sheet.rows.isEmpty) continue;
 
-      final header = sheet.rows.first.map((c) => _cellString(c?.value)).toList();
+      // on cherche la meilleure ligne d'en-tête (pas forcément la 1ère)
+      final headerRowIdx = _findHeaderRowIndex(sheet);
+      final headerRow = sheet.rows[headerRowIdx];
+
+      final header = headerRow.map((c) => _cellString(c?.value)).toList();
       final normalized = header.map(_normalizeHeader).toList();
 
       bool hasAny(List<String> aliases) {
@@ -365,18 +426,24 @@ class _SettingsPageState extends State<SettingsPage> {
       final hasBrand = hasAny(['marque']);
       final hasModel = hasAny(['modele', 'modèle', 'model']);
       final hasEntry = hasAny(['entree', 'entrée', 'date entree', 'date d entree']);
-      final hasOps = hasAny(['aos', 'proovstation', 'equipment', 'carcheck', 'aviloo']);
+      final hasOps = hasAny(['aos', 'proovstation', 'equipment', 'carcheck', 'aviloo', 'rvo']);
 
-      if (hasPlate && hasBrand && hasModel && hasEntry && hasOps) {
-        return sheet;
+      int score = 0;
+      if (hasPlate) score++;
+      if (hasBrand) score++;
+      if (hasModel) score++;
+      if (hasEntry) score++;
+      if (hasOps) score++;
+
+      if (score > bestScore) {
+        bestScore = score;
+        best = sheet;
       }
+
+      if (score == 5) return sheet; // parfait
     }
 
-    // fallback : feuille la plus large
-    final list = tables.values.toList();
-    if (list.isEmpty) return null;
-    list.sort((a, b) => b.maxColumns.compareTo(a.maxColumns));
-    return list.first;
+    return best;
   }
 
   List<Map<String, dynamic>> _parseXlsx(List<int> bytes, String kpiDate) {
@@ -385,9 +452,11 @@ class _SettingsPageState extends State<SettingsPage> {
     final sheet = _pickKpiSheet(excel);
     if (sheet == null || sheet.rows.isEmpty) return [];
 
-    final header = sheet.rows.first
-        .map((c) => _cellString(c?.value))
-        .toList();
+    // ✅ Header pas forcément ligne 0
+    final headerRowIdx = _findHeaderRowIndex(sheet);
+    final headerRow = sheet.rows[headerRowIdx];
+
+    final header = headerRow.map((c) => _cellString(c?.value)).toList();
 
     // ✅ Colonnes souples (ordre libre, noms tolérés)
     final iPlate = _findHeaderIndex(header, ['Immat', 'Immatriculation', 'Plaque']);
@@ -423,9 +492,13 @@ class _SettingsPageState extends State<SettingsPage> {
 
     final iAviloo = _findHeaderIndex(header, ['AVILOO', 'Aviloo'], required: false);
 
+    // (Optionnel) VIN : on le lit si présent, sans bloquer
+    final iVin = _findHeaderIndex(header, ['VIN'], required: false);
+
     final out = <Map<String, dynamic>>[];
 
-    for (var r = 1; r < sheet.rows.length; r++) {
+    // ⚠️ On commence après la ligne header
+    for (var r = headerRowIdx + 1; r < sheet.rows.length; r++) {
       final row = sheet.rows[r];
       if (row.isEmpty) continue;
 
@@ -438,6 +511,8 @@ class _SettingsPageState extends State<SettingsPage> {
       final ampm = _cellString(_cellAt(row, iAmPm)?.value); // optionnel -> vide si absent
       final forecast = _cellString(_cellAt(row, iForecast)?.value);
       final opAviloo = _parseOp(_cellAt(row, iAviloo)?.value);
+
+      final vin = _cellString(_cellAt(row, iVin)?.value);
 
       // ✅ IMPORTANT: support DateTime / texte / nombre
       final entryIso = _toIsoDateDynamic(_cellAt(row, iEntry)?.value);
@@ -462,6 +537,7 @@ class _SettingsPageState extends State<SettingsPage> {
       out.add({
         'kpi_date': kpiDate,
         'plate': plateRaw.toUpperCase(),
+        'vin': vin.isEmpty ? null : vin, // ✅ n'empêche pas l'insert si colonne existe côté DB
         'brand': brand,
         'model': model,
         'site': site,
@@ -497,7 +573,45 @@ class _SettingsPageState extends State<SettingsPage> {
     final rows = const CsvToListConverter().convert(text, eol: '\n');
     if (rows.isEmpty) return [];
 
-    final header = rows.first.map((e) => e.toString().trim()).toList();
+    // Cherche un header dans les premières lignes (CSV peut aussi avoir un titre)
+    int headerRowIdx = 0;
+    int bestScore = -1;
+    final scan = rows.length < 12 ? rows.length : 12;
+
+    for (var r = 0; r < scan; r++) {
+      final header = rows[r].map((e) => e.toString().trim()).toList();
+      final normalized = header.map(_normalizeHeader).toList();
+
+      bool hasAny(List<String> aliases) {
+        final set = aliases.map(_normalizeHeader).toSet();
+        return normalized.any(set.contains);
+      }
+
+      final hasPlate = hasAny(['immat', 'immatriculation', 'plaque']);
+      final hasBrand = hasAny(['marque']);
+      final hasModel = hasAny(['modele', 'modèle', 'model']);
+      final hasEntry = hasAny(['entree', 'entrée', 'date entree', 'date d entree']);
+      final hasOps = hasAny(['aos', 'proovstation', 'equipment', 'carcheck', 'aviloo', 'rvo']);
+
+      int score = 0;
+      if (hasPlate) score++;
+      if (hasBrand) score++;
+      if (hasModel) score++;
+      if (hasEntry) score++;
+      if (hasOps) score++;
+
+      if (score > bestScore) {
+        bestScore = score;
+        headerRowIdx = r;
+      }
+
+      if (score >= 4) {
+        headerRowIdx = r;
+        break;
+      }
+    }
+
+    final header = rows[headerRowIdx].map((e) => e.toString().trim()).toList();
 
     // ✅ Colonnes souples
     final iPlate = _findHeaderIndex(header, ['Immat', 'Immatriculation', 'Plaque']);
@@ -524,10 +638,11 @@ class _SettingsPageState extends State<SettingsPage> {
     final iRvoEquip = _findHeaderIndex(header, ['RVO Equpmt', 'RVO Equipment', 'RVO Equipement'], required: false);
 
     final iAviloo = _findHeaderIndex(header, ['AVILOO', 'Aviloo'], required: false);
+    final iVin = _findHeaderIndex(header, ['VIN'], required: false);
 
     final out = <Map<String, dynamic>>[];
 
-    for (var r = 1; r < rows.length; r++) {
+    for (var r = headerRowIdx + 1; r < rows.length; r++) {
       final row = rows[r];
       if (row.length <= iPlate) continue;
 
@@ -539,9 +654,10 @@ class _SettingsPageState extends State<SettingsPage> {
       final site = _cellString(_cellAt(row, iSite));
       final ampm = _cellString(_cellAt(row, iAmPm));
       final forecast = _cellString(_cellAt(row, iForecast));
-      final aviloo = _cellString(_cellAt(row, iAviloo));
 
-      // ✅ CSV: valeur directe (pas de .value)
+      final vin = _cellString(_cellAt(row, iVin));
+
+      // ✅ CSV: valeur directe
       final entryIso = _toIsoDateDynamic(_cellAt(row, iEntry));
 
       final opPhoto = _parseOp(_cellAt(row, iPhoto));
@@ -564,12 +680,13 @@ class _SettingsPageState extends State<SettingsPage> {
       out.add({
         'kpi_date': kpiDate,
         'plate': plateRaw.toUpperCase(),
+        'vin': vin.isEmpty ? null : vin,
         'brand': brand,
         'model': model,
         'site': site,
         'am_pm': ampm,
         'forecast_sales': forecast,
-        'aviloo': aviloo,
+        'aviloo': _cellString(_cellAt(row, iAviloo)),
         'entry_time': entryIso,
 
         'required_photo': opPhoto.required,
@@ -608,234 +725,136 @@ class _SettingsPageState extends State<SettingsPage> {
     return Scaffold(
       backgroundColor: _bg,
       appBar: AppBar(
+        backgroundColor: _bg,
         elevation: 0,
-        backgroundColor: _card,
+        title: const Text("Paramètres / Export KPI"),
         foregroundColor: _text,
-        title: const Text(
-          "Paramètres",
-          style: TextStyle(fontWeight: FontWeight.w900),
-        ),
         actions: [
           if (locked)
             IconButton(
-              onPressed: _askPassword,
-              icon: const Icon(Icons.lock_rounded),
               tooltip: "Déverrouiller",
-            ),
-          if (!locked)
+              onPressed: _importing ? null : _askPassword,
+              icon: const Icon(Icons.lock),
+            )
+          else
             IconButton(
-              onPressed: () => setState(() => _unlocked = false),
-              icon: const Icon(Icons.lock_open_rounded),
               tooltip: "Verrouiller",
+              onPressed: _importing
+                  ? null
+                  : () {
+                      setState(() => _unlocked = false);
+                    },
+              icon: const Icon(Icons.lock_open),
             ),
         ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(1),
-          child: Container(height: 1, color: _border),
-        ),
       ),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // ===== CARD: Import KPI =====
-              Container(
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: _card,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: _border),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.05),
-                      blurRadius: 16,
-                      offset: const Offset(0, 10),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: _card,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: _border),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    "Import KPI vers Supabase",
+                    style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: _text),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    locked
+                        ? "🔒 Page verrouillée : clique sur le cadenas pour entrer le mot de passe."
+                        : "✅ Page déverrouillée : tu peux importer un fichier KPI (.xlsx ou .csv).",
+                    style: const TextStyle(color: _muted),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Date KPI
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: _card2,
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: _border),
                     ),
-                  ],
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Row(
+                    child: Row(
                       children: [
-                        Container(
-                          width: 44,
-                          height: 44,
-                          decoration: BoxDecoration(
-                            color: _accent.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                          child: const Icon(Icons.upload_file_rounded, color: _accent),
-                        ),
-                        const SizedBox(width: 12),
-                        const Expanded(
-                          child: Text(
-                            "Import KPI",
-                            style: TextStyle(color: _text, fontWeight: FontWeight.w900, fontSize: 16),
-                          ),
-                        ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                          decoration: BoxDecoration(
-                            color: _card2,
-                            borderRadius: BorderRadius.circular(999),
-                            border: Border.all(color: _border),
-                          ),
-                          child: Row(
-                            children: [
-                              Container(
-                                width: 8,
-                                height: 8,
-                                decoration: BoxDecoration(
-                                  color: locked ? const Color(0xFFEF4444) : const Color(0xFF16A34A),
-                                  shape: BoxShape.circle,
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              Text(
-                                locked ? "Verrouillé" : "Déverrouillé",
-                                style: const TextStyle(color: _muted, fontWeight: FontWeight.w900, fontSize: 12),
-                              ),
-                            ],
+                        const Icon(Icons.calendar_today, size: 18, color: _muted),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: TextField(
+                            controller: _dateCtrl,
+                            enabled: !locked && !_importing,
+                            decoration: const InputDecoration(
+                              border: InputBorder.none,
+                              labelText: "Date KPI (yyyy-MM-dd)",
+                            ),
                           ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: _dateCtrl,
-                      enabled: !_importing,
-                      decoration: InputDecoration(
-                        labelText: "Date KPI (yyyy-MM-dd)",
-                        filled: true,
-                        fillColor: _card2,
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(14),
-                          borderSide: const BorderSide(color: _border),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(14),
-                          borderSide: const BorderSide(color: _border),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(14),
-                          borderSide: BorderSide(color: _accent.withValues(alpha: 0.7), width: 2),
-                        ),
-                        prefixIcon: const Icon(Icons.calendar_month_rounded),
+                  ),
+
+                  const SizedBox(height: 16),
+
+                  // Bouton import
+                  SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: locked ? Colors.grey.shade400 : _accent,
+                        foregroundColor: Colors.white,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                       ),
-                      style: const TextStyle(color: _text, fontWeight: FontWeight.w900),
+                      onPressed: (locked || _importing) ? null : _importKpi,
+                      icon: _importing
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                            )
+                          : const Icon(Icons.cloud_upload),
+                      label: Text(_importing ? "Import en cours…" : "Importer un fichier KPI"),
                     ),
-                    const SizedBox(height: 12),
-                    if (locked)
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFFFFF7ED),
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(color: const Color(0xFFFED7AA)),
-                        ),
-                        child: const Row(
-                          children: [
-                            Icon(Icons.lock_rounded, color: Color(0xFF9A3412)),
-                            SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                "Déverrouille avec le cadenas pour importer.",
-                                style: TextStyle(color: Color(0xFF9A3412), fontWeight: FontWeight.w800),
-                              ),
-                            ),
-                          ],
-                        ),
-                      )
-                    else
-                      ElevatedButton.icon(
-                        onPressed: _importing ? null : _importKpi,
-                        icon: _importing
-                            ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                        )
-                            : const Icon(Icons.upload_file_rounded),
-                        label: Text(_importing ? "Import en cours…" : "Importer un KPI (XLSX / CSV)"),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: _accent,
-                          foregroundColor: Colors.white,
-                          elevation: 0,
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                          textStyle: const TextStyle(fontWeight: FontWeight.w900),
-                        ),
-                      ),
-                    const SizedBox(height: 12),
-                    if (_status.isNotEmpty)
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: _card2,
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(color: _border),
-                        ),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Container(
-                              width: 10,
-                              height: 10,
-                              margin: const EdgeInsets.only(top: 4),
-                              decoration: BoxDecoration(
-                                color: _statusTone(_status),
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                _status,
-                                style: const TextStyle(color: _text, fontWeight: FontWeight.w700, fontSize: 13),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 12),
-              // ===== CARD: Aide Colonnes =====
-              Container(
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: _card,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: _border),
-                ),
-                child: const Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      "Format attendu",
-                      style: TextStyle(color: _text, fontWeight: FontWeight.w900, fontSize: 14),
-                    ),
-                    SizedBox(height: 10),
-                    Text(
-                      "Colonnes attendues (feuille KPI) :\n"
-                          "Immat, MARQUE, Modele, Site, Entrée, AM/PM, Forecast Ventes,\n"
-                          "AOS, Proovstation, Equipment, CarCheck, RVO Dégâts, RVO Equpmt, AVILOO\n\n"
-                          "Règles :\n"
-                          "- \"A FAIRE\" => opération requise\n"
-                          "- une date => opération déjà faite (stockée)\n"
-                          "- RVO remplace Proovstation/Equipment si RVO contient A FAIRE ou une date\n\n"
-                          "✅ L'import est maintenant plus tolérant : ordre libre, noms proches acceptés, AM/PM optionnel.",
-                      style: TextStyle(color: _muted, fontWeight: FontWeight.w700, fontSize: 12, height: 1.35),
-                    ),
-                  ],
-                ),
+            ),
+
+            const SizedBox(height: 16),
+
+            // Status
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                color: _card,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: _border),
               ),
-            ],
-          ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.info_outline, color: _statusTone(_status)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      _status.isEmpty ? "Aucun import lancé." : _status,
+                      style: TextStyle(color: _statusTone(_status), fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );
