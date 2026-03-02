@@ -168,7 +168,7 @@ class _SettingsPageState extends State<SettingsPage> {
         } catch (e) {
           // Si un batch échoue, on tente ligne par ligne pour trouver LA ligne fautive
           setState(() => _status =
-              "❌ Batch en erreur (lignes ${i + 1} -> ${i + batch.length}). Recherche de la ligne fautive…");
+          "❌ Batch en erreur (lignes ${i + 1} -> ${i + batch.length}). Recherche de la ligne fautive…");
 
           for (var j = 0; j < batch.length; j++) {
             try {
@@ -177,8 +177,8 @@ class _SettingsPageState extends State<SettingsPage> {
               final bad = batch[j];
               throw Exception(
                 "Erreur insert à la ligne ${i + j + 1} : $e2\n"
-                "plate=${bad['plate']} entry_time=${bad['entry_time']}\n"
-                "row=$bad",
+                    "plate=${bad['plate']} entry_time=${bad['entry_time']}\n"
+                    "row=$bad",
               );
             }
           }
@@ -749,8 +749,8 @@ class _SettingsPageState extends State<SettingsPage> {
               onPressed: _importing
                   ? null
                   : () {
-                      setState(() => _unlocked = false);
-                    },
+                setState(() => _unlocked = false);
+              },
               icon: const Icon(Icons.lock_open),
             ),
         ],
@@ -797,9 +797,16 @@ class _SettingsPageState extends State<SettingsPage> {
                           child: TextField(
                             controller: _dateCtrl,
                             enabled: !locked && !_importing,
+                            style: const TextStyle(
+                              color: Colors.black, // ✅ texte saisi noir
+                            ),
+                            cursorColor: Colors.black, // ✅ curseur noir
                             decoration: const InputDecoration(
                               border: InputBorder.none,
                               labelText: "Date KPI (yyyy-MM-dd)",
+                              labelStyle: TextStyle(
+                                color: Colors.black, // ✅ label noir
+                              ),
                             ),
                           ),
                         ),
@@ -819,10 +826,10 @@ class _SettingsPageState extends State<SettingsPage> {
                       onPressed: (locked || _importing) ? null : _importKpi,
                       icon: _importing
                           ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                            )
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                      )
                           : const Icon(Icons.cloud_upload),
                       label: Text(_importing ? "Import en cours…" : "Importer un fichier KPI"),
                     ),
