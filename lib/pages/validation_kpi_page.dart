@@ -147,18 +147,24 @@ class _ValidationKpiPageState extends State<ValidationKpiPage> {
           "${today.month.toString().padLeft(2, '0')}-"
           "${today.day.toString().padLeft(2, '0')}";
 
-      var q = supabase
-          .from('kpi_vehicles')
-          .select('plate')
-          .eq('kpi_date', kpiDate);
+      List rows = [];
 
       if (selectedSite != null && selectedSite.toString().trim().isNotEmpty) {
-        q = q.ilike('site', '%$selectedSite%');
+        rows = await supabase
+            .from('kpi_vehicles')
+            .select('plate')
+            .eq('kpi_date', kpiDate)
+            .ilike('site', '%$selectedSite%');
       }
 
-      final rows = await q;
+      if (rows.isEmpty) {
+        rows = await supabase
+            .from('kpi_vehicles')
+            .select('plate')
+            .eq('kpi_date', kpiDate);
+      }
 
-      final plates = (rows as List)
+      final plates = rows
           .map((e) => (e['plate'] ?? '').toString())
           .where((p) => p.isNotEmpty)
           .toList();
@@ -566,15 +572,15 @@ class _ValidationKpiPageState extends State<ValidationKpiPage> {
                         suffixIcon: plateController.text.isEmpty
                             ? null
                             : IconButton(
-                          tooltip: "Effacer",
-                          onPressed: _isValidating
-                              ? null
-                              : () {
-                            plateController.clear();
-                            setState(() {});
-                          },
-                          icon: const Icon(Icons.close_rounded),
-                        ),
+                                tooltip: "Effacer",
+                                onPressed: _isValidating
+                                    ? null
+                                    : () {
+                                        plateController.clear();
+                                        setState(() {});
+                                      },
+                                icon: const Icon(Icons.close_rounded),
+                              ),
                       ),
                       onChanged: (_) => setState(() {}),
                       onSubmitted: (_) async {
@@ -611,17 +617,17 @@ class _ValidationKpiPageState extends State<ValidationKpiPage> {
                             onPressed: _isValidating
                                 ? null
                                 : () async {
-                              setState(() => _isValidating = true);
-                              await validateVehicle(tasks);
-                              if (!mounted) return;
-                              setState(() => _isValidating = false);
-                            },
+                                    setState(() => _isValidating = true);
+                                    await validateVehicle(tasks);
+                                    if (!mounted) return;
+                                    setState(() => _isValidating = false);
+                                  },
                             icon: _isValidating
                                 ? const SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                            )
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                  )
                                 : const Icon(Icons.check_rounded),
                             label: Text(_isValidating ? "Validation…" : "Valider"),
                             style: ElevatedButton.styleFrom(
@@ -687,29 +693,29 @@ class _ValidationKpiPageState extends State<ValidationKpiPage> {
                         children: tasks
                             .map(
                               (t) => Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                            decoration: BoxDecoration(
-                              color: _accent.withValues(alpha: 0.10),
-                              borderRadius: BorderRadius.circular(999),
-                              border: Border.all(color: _accent.withValues(alpha: 0.25)),
-                            ),
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                const Icon(Icons.check_circle_rounded, size: 16, color: _accent),
-                                const SizedBox(width: 8),
-                                Text(
-                                  t,
-                                  style: const TextStyle(
-                                    color: _text,
-                                    fontWeight: FontWeight.w900,
-                                    fontSize: 12,
-                                  ),
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: _accent.withValues(alpha: 0.10),
+                                  borderRadius: BorderRadius.circular(999),
+                                  border: Border.all(color: _accent.withValues(alpha: 0.25)),
                                 ),
-                              ],
-                            ),
-                          ),
-                        )
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.check_circle_rounded, size: 16, color: _accent),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      t,
+                                      style: const TextStyle(
+                                        color: _text,
+                                        fontWeight: FontWeight.w900,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            )
                             .toList(),
                       ),
                   ],
