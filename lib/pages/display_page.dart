@@ -129,9 +129,12 @@ class _DisplayPageState extends State<DisplayPage> {
 
       // 3) Filtre par site (on ne garde que les plaques du site)
       final left = (leftAll as List)
-          .map((e) => Map<String, dynamic>.from(e))
-          .where((v) => sitePlates.contains((v['plate'] ?? '').toString()))
-          .toList();
+    .map((e) => Map<String, dynamic>.from(e))
+    .where((v) {
+      if (sitePlates.isEmpty) return true; // fallback si aucun site exploitable
+      return sitePlates.contains((v['plate'] ?? '').toString());
+    })
+    .toList();
 
       final right = await supabase
           .from('last_fully_validated_30')
