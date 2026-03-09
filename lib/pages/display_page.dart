@@ -108,17 +108,25 @@ class _DisplayPageState extends State<DisplayPage> {
       final selectedSite = await SitePrefs.getSite();
       final kpiDate = _todayKpiDateUtc();
 
-      // 1) Plaques du site sélectionné (ex: Bouchain) depuis kpi_vehicles
+      // 1) Plaques du site sélectionné + forecast ventes depuis kpi_vehicles
       final siteRows = await supabase
           .from('kpi_vehicles')
-          .select('plate')
+          .select('plate, forecast_sales')
           .eq('kpi_date', kpiDate)
           .ilike('site', '%$selectedSite%');
 
-      final sitePlates = (siteRows as List)
-          .map((r) => (r['plate'] ?? '').toString())
-          .where((p) => p.isNotEmpty)
-          .toSet();
+      final siteMap = <String, String>{};
+
+      for (final row in (siteRows as List)) {
+        final plate = (row['plate'] ?? '').toString().trim();
+        final forecast = (row['forecast_sales'] ?? '').toString().trim();
+
+        if (plate.isNotEmpty) {
+          siteMap[plate] = forecast;
+        }
+      }
+
+      final sitePlates = siteMap.keys.toSet();
 
       // 2) Statut validations (logique OK) depuis vehicle_status_today
       final leftAll = await supabase
@@ -127,14 +135,24 @@ class _DisplayPageState extends State<DisplayPage> {
           .order('fully_validated', ascending: true)
           .order('urgency_time', ascending: true);
 
-      // 3) Filtre par site (on ne garde que les plaques du site)
+      // 3) Filtre par site + injection du forecast_sales si absent dans vehicle_status_today
       final left = (leftAll as List)
-    .map((e) => Map<String, dynamic>.from(e))
-    .where((v) {
-      if (sitePlates.isEmpty) return true; // fallback si aucun site exploitable
-      return sitePlates.contains((v['plate'] ?? '').toString());
-    })
-    .toList();
+          .map((e) => Map<String, dynamic>.from(e))
+          .where((v) {
+        if (sitePlates.isEmpty) return true;
+        return sitePlates.contains((v['plate'] ?? '').toString().trim());
+      })
+          .map((v) {
+        final plate = (v['plate'] ?? '').toString().trim();
+        final existingForecast = (v['forecast_sales'] ?? '').toString().trim();
+
+        if (existingForecast.isEmpty && siteMap.containsKey(plate)) {
+          v['forecast_sales'] = siteMap[plate];
+        }
+
+        return v;
+      })
+          .toList();
 
       final right = await supabase
           .from('last_fully_validated_30')
@@ -604,6 +622,13 @@ class _DisplayPageState extends State<DisplayPage> {
                   ),
                 ),
                 Expanded(
+                  flex: 3,
+                  child: Text(
+                    "Forecast",
+                    style: TextStyle(color: textMuted, fontWeight: FontWeight.w900, fontSize: s(12)),
+                  ),
+                ),
+                Expanded(
                   flex: 7,
                   child: Text(
                     "Opérations",
@@ -641,6 +666,8 @@ class _DisplayPageState extends State<DisplayPage> {
                 final brand = (v['brand'] ?? '').toString();
                 final model = (v['model'] ?? '').toString();
                 final entryIso = v['urgency_time'];
+                final forecastSales = (v['forecast_sales'] ?? '').toString().trim();
+                final hasForecastSales = forecastSales.isNotEmpty;
 
                 final requiredDamage = v['required_damage'] == true;
                 final requiredCarcheck = v['required_carcheck'] == true;
@@ -719,7 +746,22 @@ class _DisplayPageState extends State<DisplayPage> {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
+
                       SizedBox(width: s(8)),
+                      Expanded(
+                        flex: 3,
+                        child: Text(
+                          hasForecastSales ? forecastSales : '',
+                          style: TextStyle(
+                            color: textMuted,
+                            fontWeight: FontWeight.w700,
+                            fontSize: s(11),
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      SizedBox(width: s(8)),
+
                       Expanded(
                         flex: 7,
                         child: Wrap(
