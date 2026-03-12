@@ -3,6 +3,7 @@
 // ✅ Ne dépend PAS de excel.tables (utilise excel.sheets)
 // ✅ N'échoue pas si certaines colonnes sont absentes (elles deviennent optionnelles)
 // ✅ Affiche la vraie erreur Supabase + trouve la ligne fautive si un batch échoue
+// ✅ Si la colonne Site est absente/vide, utilise le site sélectionné dans l'app
 
 import 'dart:convert';
 
@@ -12,6 +13,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
+import '../state/site_prefs.dart';
 
 class _Op {
   final bool required;
@@ -138,12 +141,13 @@ class _SettingsPageState extends State<SettingsPage> {
 
       final ext = (file.extension ?? "").toLowerCase();
       final kpiDate = _dateCtrl.text.trim(); // yyyy-MM-dd
+      final selectedSite = (await SitePrefs.getSite()).trim();
 
       List<Map<String, dynamic>> rows;
       if (ext == "xlsx") {
-        rows = _parseXlsx(bytes, kpiDate);
+        rows = _parseXlsx(bytes, kpiDate, selectedSite);
       } else if (ext == "csv") {
-        rows = _parseCsv(bytes, kpiDate);
+        rows = _parseCsv(bytes, kpiDate, selectedSite);
       } else {
         throw Exception("Extension non supportée: .$ext");
       }
@@ -166,7 +170,6 @@ class _SettingsPageState extends State<SettingsPage> {
         try {
           await supabase.from('kpi_vehicles').insert(batch);
         } catch (e) {
-          // Si un batch échoue, on tente ligne par ligne pour trouver LA ligne fautive
           setState(() => _status =
           "❌ Batch en erreur (lignes ${i + 1} -> ${i + batch.length}). Recherche de la ligne fautive…");
 
@@ -199,7 +202,6 @@ class _SettingsPageState extends State<SettingsPage> {
     } catch (e) {
       String msg = e.toString();
 
-      // Erreurs Supabase plus lisibles
       if (e is PostgrestException) {
         msg = "PostgrestException: ${e.message}\ncode: ${e.code}\ndetails: ${e.details}\nhint: ${e.hint}";
       }
@@ -214,8 +216,6 @@ class _SettingsPageState extends State<SettingsPage> {
       );
     }
   }
-
-  // ---------- PARSING KPI ----------
 
   bool _isAFaire(dynamic v) {
     var s = (v ?? '').toString();
@@ -261,7 +261,6 @@ class _SettingsPageState extends State<SettingsPage> {
       return "$yyyy-$mm-$dd";
     }
 
-    // Dernière tentative
     try {
       final dt = DateTime.parse(s0);
       final yyyy = dt.year.toString().padLeft(4, '0');
@@ -295,8 +294,6 @@ class _SettingsPageState extends State<SettingsPage> {
 
     return const _Op(required: false, doneIso: null, hasSomething: true);
   }
-
-  // ===== Helpers colonnes souples =====
 
   String _normalizeHeader(String s) {
     return s
@@ -351,12 +348,25 @@ class _SettingsPageState extends State<SettingsPage> {
     return -1;
   }
 
+  int _findStrictHeaderIndex(List<String> header, List<String> aliases, {bool required = true}) {
+    final normalizedHeader = header.map(_normalizeHeader).toList();
+    final normalizedAliases = aliases.map(_normalizeHeader).toList();
+
+    for (final alias in normalizedAliases) {
+      final idx = normalizedHeader.indexOf(alias);
+      if (idx >= 0) return idx;
+    }
+
+    if (required) {
+      throw Exception("Colonne introuvable (strict aliases: ${aliases.join(' / ')})");
+    }
+    return -1;
+  }
+
   dynamic _cellAt(List<dynamic> row, int index) {
     if (index < 0 || index >= row.length) return null;
     return row[index];
   }
-
-  // ===== Détection feuille + header ligne =====
 
   int _findHeaderRowIndexInSheet(ex.Sheet sheet, {int scanRows = 15}) {
     final limit = sheet.rows.length < scanRows ? sheet.rows.length : scanRows;
@@ -444,8 +454,7 @@ class _SettingsPageState extends State<SettingsPage> {
     return best;
   }
 
-  // ===== XLSX parsing (tolérant) =====
-  List<Map<String, dynamic>> _parseXlsx(List<int> bytes, String kpiDate) {
+  List<Map<String, dynamic>> _parseXlsx(List<int> bytes, String kpiDate, String fallbackSite) {
     final excel = ex.Excel.decodeBytes(bytes);
 
     final sheet = _pickKpiSheet(excel);
@@ -455,15 +464,13 @@ class _SettingsPageState extends State<SettingsPage> {
     final headerRow = sheet.rows[headerRowIdx];
     final header = headerRow.map((c) => _cellString(c?.value)).toList();
 
-    // ✅ Plaque + Marque + Modèle : essentiels (mais alias très larges)
     final iPlate = _findHeaderIndex(header, ['Immat', 'Immatriculation', 'Plaque', 'Plate']);
     final iBrand = _findHeaderIndex(header, ['Marque', 'MARQUE', 'Brand'], required: false);
     final iModel = _findHeaderIndex(header, ['Modele', 'Modèle', 'Model'], required: false);
 
-    // ✅ Tout le reste optionnel (moins strict)
-    final iSite = _findHeaderIndex(
+    final iSite = _findStrictHeaderIndex(
       header,
-      ['Site', 'Site entree', 'Site d entree', 'Lieu', 'Emplacement', 'Location'],
+      ['Site', 'Lieu', 'Emplacement', 'Location'],
       required: false,
     );
 
@@ -513,7 +520,10 @@ class _SettingsPageState extends State<SettingsPage> {
 
       final brand = iBrand >= 0 ? _cellString(_cellAt(row, iBrand)?.value) : '';
       final model = iModel >= 0 ? _cellString(_cellAt(row, iModel)?.value) : '';
-      final site = iSite >= 0 ? _cellString(_cellAt(row, iSite)?.value) : '';
+
+      final siteRaw = iSite >= 0 ? _cellString(_cellAt(row, iSite)?.value) : '';
+      final site = siteRaw.isNotEmpty ? siteRaw : fallbackSite;
+
       final ampm = iAmPm >= 0 ? _cellString(_cellAt(row, iAmPm)?.value) : '';
       final forecast = iForecast >= 0 ? _cellString(_cellAt(row, iForecast)?.value) : '';
 
@@ -544,19 +554,16 @@ class _SettingsPageState extends State<SettingsPage> {
         'am_pm': ampm,
         'forecast_sales': forecast,
         'entry_time': entryIso,
-
         'required_photo': opPhoto.required,
         'required_damage': finalDamage.required,
         'required_equipment': finalEquip.required,
         'required_carcheck': opCar.required,
         'required_aviloo': opAviloo.required,
-
         'photo_done_date': opPhoto.doneIso,
         'damage_done_date': finalDamage.doneIso,
         'equipment_done_date': finalEquip.doneIso,
         'carcheck_done_date': opCar.doneIso,
         'aviloo_done_date': opAviloo.doneIso,
-
         'damage_source': useRvoDamage ? 'rvo' : 'proovstation',
         'equipment_source': useRvoEquip ? 'rvo' : 'equipment',
       });
@@ -565,13 +572,11 @@ class _SettingsPageState extends State<SettingsPage> {
     return out;
   }
 
-  // ===== CSV parsing (tolérant) =====
-  List<Map<String, dynamic>> _parseCsv(List<int> bytes, String kpiDate) {
+  List<Map<String, dynamic>> _parseCsv(List<int> bytes, String kpiDate, String fallbackSite) {
     final text = utf8.decode(bytes);
     final rows = const CsvToListConverter().convert(text, eol: '\n');
     if (rows.isEmpty) return [];
 
-    // détecte header dans les premières lignes
     int headerRowIdx = 0;
     int bestScore = -1;
     final scan = rows.length < 15 ? rows.length : 15;
@@ -612,9 +617,9 @@ class _SettingsPageState extends State<SettingsPage> {
     final iBrand = _findHeaderIndex(header, ['Marque', 'MARQUE', 'Brand'], required: false);
     final iModel = _findHeaderIndex(header, ['Modele', 'Modèle', 'Model'], required: false);
 
-    final iSite = _findHeaderIndex(
+    final iSite = _findStrictHeaderIndex(
       header,
-      ['Site', 'Site entree', 'Site d entree', 'Lieu', 'Emplacement', 'Location'],
+      ['Site', 'Lieu', 'Emplacement', 'Location'],
       required: false,
     );
 
@@ -664,7 +669,10 @@ class _SettingsPageState extends State<SettingsPage> {
 
       final brand = iBrand >= 0 ? _cellString(_cellAt(row, iBrand)) : '';
       final model = iModel >= 0 ? _cellString(_cellAt(row, iModel)) : '';
-      final site = iSite >= 0 ? _cellString(_cellAt(row, iSite)) : '';
+
+      final siteRaw = iSite >= 0 ? _cellString(_cellAt(row, iSite)) : '';
+      final site = siteRaw.isNotEmpty ? siteRaw : fallbackSite;
+
       final ampm = iAmPm >= 0 ? _cellString(_cellAt(row, iAmPm)) : '';
       final forecast = iForecast >= 0 ? _cellString(_cellAt(row, iForecast)) : '';
 
@@ -695,19 +703,16 @@ class _SettingsPageState extends State<SettingsPage> {
         'am_pm': ampm,
         'forecast_sales': forecast,
         'entry_time': entryIso,
-
         'required_photo': opPhoto.required,
         'required_damage': finalDamage.required,
         'required_equipment': finalEquip.required,
         'required_carcheck': opCar.required,
         'required_aviloo': opAviloo.required,
-
         'photo_done_date': opPhoto.doneIso,
         'damage_done_date': finalDamage.doneIso,
         'equipment_done_date': finalEquip.doneIso,
         'carcheck_done_date': opCar.doneIso,
         'aviloo_done_date': opAviloo.doneIso,
-
         'damage_source': useRvoDamage ? 'rvo' : 'proovstation',
         'equipment_source': useRvoEquip ? 'rvo' : 'equipment',
       });
@@ -797,16 +802,12 @@ class _SettingsPageState extends State<SettingsPage> {
                           child: TextField(
                             controller: _dateCtrl,
                             enabled: !locked && !_importing,
-                            style: const TextStyle(
-                              color: Colors.black, // ✅ texte saisi noir
-                            ),
-                            cursorColor: Colors.black, // ✅ curseur noir
+                            style: const TextStyle(color: Colors.black),
+                            cursorColor: Colors.black,
                             decoration: const InputDecoration(
                               border: InputBorder.none,
                               labelText: "Date KPI (yyyy-MM-dd)",
-                              labelStyle: TextStyle(
-                                color: Colors.black, // ✅ label noir
-                              ),
+                              labelStyle: TextStyle(color: Colors.black),
                             ),
                           ),
                         ),
