@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform;
+import 'package:qr_flutter/qr_flutter.dart';
 
 import '../state/site_prefs.dart';
 
@@ -63,6 +64,114 @@ class _DisplayPageState extends State<DisplayPage> {
       supabase.removeChannel(_channel!);
     }
     super.dispose();
+  }
+
+  // ✅ Nettoie la plaque pour le QR : uniquement lettres et chiffres
+  String _sanitizePlateForQr(String plate) {
+    return plate.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+  }
+
+  // ✅ Popup QR agrandi
+  void _showQrPopup({
+    required String plate,
+    required String qrPlate,
+  }) {
+    if (qrPlate.isEmpty) return;
+
+    showDialog(
+      context: context,
+      builder: (dialogContext) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.all(24),
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 420),
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(color: const Color(0xFFE5E7EB)),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x22000000),
+                  blurRadius: 24,
+                  offset: Offset(0, 10),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  "QR Code véhicule",
+                  style: const TextStyle(
+                    color: Color(0xFF0F172A),
+                    fontWeight: FontWeight.w900,
+                    fontSize: 20,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  plate.isEmpty ? "—" : plate,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xFF64748B),
+                    fontWeight: FontWeight.w800,
+                    fontSize: 16,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: const Color(0xFFE5E7EB)),
+                  ),
+                  child: QrImageView(
+                    data: qrPlate,
+                    version: QrVersions.auto,
+                    size: 240,
+                    backgroundColor: Colors.white,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                SelectableText(
+                  qrPlate,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Color(0xFF0F172A),
+                    fontWeight: FontWeight.w900,
+                    fontSize: 18,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF2563EB),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      elevation: 0,
+                    ),
+                    child: const Text(
+                      "Fermer",
+                      style: TextStyle(fontWeight: FontWeight.w900),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   // ✅ convertit une date ISO en "jour" (sans heure)
@@ -629,7 +738,7 @@ class _DisplayPageState extends State<DisplayPage> {
                   ),
                 ),
                 Expanded(
-                  flex: 7,
+                  flex: 8,
                   child: Text(
                     "Opérations",
                     style: TextStyle(color: textMuted, fontWeight: FontWeight.w900, fontSize: s(12)),
@@ -663,6 +772,7 @@ class _DisplayPageState extends State<DisplayPage> {
                 final v = vehiclesToProcess[index];
 
                 final plate = (v['plate'] ?? '').toString();
+                final qrPlate = _sanitizePlateForQr(plate);
                 final brand = (v['brand'] ?? '').toString();
                 final model = (v['model'] ?? '').toString();
                 final entryIso = v['urgency_time'];
@@ -746,7 +856,6 @@ class _DisplayPageState extends State<DisplayPage> {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-
                       SizedBox(width: s(8)),
                       Expanded(
                         flex: 3,
@@ -761,18 +870,48 @@ class _DisplayPageState extends State<DisplayPage> {
                         ),
                       ),
                       SizedBox(width: s(8)),
-
                       Expanded(
-                        flex: 7,
-                        child: Wrap(
-                          spacing: s(8),
-                          runSpacing: s(8),
+                        flex: 8,
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
-                            _OpChipLight(ui: ui, label: "Relevé", state: damageState),
-                            _OpChipLight(ui: ui, label: "Carcheck", state: carcheckState),
-                            _OpChipLight(ui: ui, label: "Photo", state: photoState),
-                            _OpChipLight(ui: ui, label: "Équip.", state: equipmentState),
-                            _OpChipLight(ui: ui, label: "Aviloo", state: avilooState),
+                            Expanded(
+                              child: Wrap(
+                                spacing: s(8),
+                                runSpacing: s(8),
+                                children: [
+                                  _OpChipLight(ui: ui, label: "Relevé", state: damageState),
+                                  _OpChipLight(ui: ui, label: "Carcheck", state: carcheckState),
+                                  _OpChipLight(ui: ui, label: "Photo", state: photoState),
+                                  _OpChipLight(ui: ui, label: "Équip.", state: equipmentState),
+                                  _OpChipLight(ui: ui, label: "Aviloo", state: avilooState),
+                                ],
+                              ),
+                            ),
+                            SizedBox(width: s(10)),
+                            qrPlate.isEmpty
+                                ? const SizedBox.shrink()
+                                : InkWell(
+                              onTap: () => _showQrPopup(
+                                plate: plate,
+                                qrPlate: qrPlate,
+                              ),
+                              borderRadius: BorderRadius.circular(s(8)),
+                              child: Container(
+                                padding: EdgeInsets.all(s(4)),
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  borderRadius: BorderRadius.circular(s(8)),
+                                  border: Border.all(color: border),
+                                ),
+                                child: QrImageView(
+                                  data: qrPlate,
+                                  version: QrVersions.auto,
+                                  size: s(46),
+                                  backgroundColor: Colors.white,
+                                ),
+                              ),
+                            ),
                           ],
                         ),
                       ),
