@@ -17,6 +17,10 @@ class _LoginPageState extends State<LoginPage> {
   bool _requireOperatorAuth = false;
   bool _operatorAuthed = false;
 
+  // ✅ nouveau
+  String _nextRoute = '/home';
+  bool _forceAllTasks = false;
+
   bool damageSelected = false;
   bool carcheckSelected = false;
   bool photoSelected = false;
@@ -43,6 +47,23 @@ class _LoginPageState extends State<LoginPage> {
     if (args is Map) {
       final v = args['requireOperatorAuth'];
       _requireOperatorAuth = v == true;
+
+      final routeArg = args['nextRoute'];
+      if (routeArg is String && routeArg.isNotEmpty) {
+        _nextRoute = routeArg;
+      }
+
+      final forceArg = args['forceAllTasks'];
+      _forceAllTasks = forceArg == true;
+    }
+
+    // ✅ si on arrive en mode afficheur, on pré-active toutes les tâches visuellement
+    if (_forceAllTasks) {
+      damageSelected = true;
+      carcheckSelected = true;
+      photoSelected = true;
+      equipmentSelected = true;
+      avilooSelected = true;
     }
 
     // Si déjà connecté, on ne redemande pas
@@ -246,15 +267,25 @@ class _LoginPageState extends State<LoginPage> {
 
     final appState = Provider.of<AppState>(context, listen: false);
 
-    appState.setTasks(
-      damage: damageSelected,
-      carcheck: carcheckSelected,
-      photo: photoSelected,
-      equipment: equipmentSelected,
-      aviloo: avilooSelected,
-    );
+    if (_forceAllTasks) {
+      appState.setTasks(
+        damage: true,
+        carcheck: true,
+        photo: true,
+        equipment: true,
+        aviloo: true,
+      );
+    } else {
+      appState.setTasks(
+        damage: damageSelected,
+        carcheck: carcheckSelected,
+        photo: photoSelected,
+        equipment: equipmentSelected,
+        aviloo: avilooSelected,
+      );
+    }
 
-    Navigator.pushReplacementNamed(context, '/home');
+    Navigator.pushReplacementNamed(context, _nextRoute);
   }
 
   int _selectedCount() {
@@ -279,7 +310,6 @@ class _LoginPageState extends State<LoginPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // ===== Header =====
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
@@ -299,11 +329,11 @@ class _LoginPageState extends State<LoginPage> {
                       child: const Icon(Icons.assignment_rounded, color: _accent),
                     ),
                     const SizedBox(width: 12),
-                    const Expanded(
+                    Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
+                          const Text(
                             "KPI",
                             style: TextStyle(
                               color: _text,
@@ -311,10 +341,12 @@ class _LoginPageState extends State<LoginPage> {
                               fontWeight: FontWeight.w900,
                             ),
                           ),
-                          SizedBox(height: 4),
+                          const SizedBox(height: 4),
                           Text(
-                            "Sélectionne les tâches actives",
-                            style: TextStyle(
+                            _forceAllTasks
+                                ? "Mode afficheur : toutes les tâches seront activées"
+                                : "Sélectionne les tâches actives",
+                            style: const TextStyle(
                               color: _muted,
                               fontWeight: FontWeight.w700,
                               fontSize: 12,
@@ -341,41 +373,49 @@ class _LoginPageState extends State<LoginPage> {
 
               const SizedBox(height: 14),
 
-              // ===== Task tiles =====
               buildTaskTile(
                 label: 'Relevé de dommages',
                 icon: Icons.car_crash_rounded,
                 isSelected: damageSelected,
-                onTap: () => setState(() => damageSelected = !damageSelected),
+                onTap: _forceAllTasks
+                    ? () {}
+                    : () => setState(() => damageSelected = !damageSelected),
               ),
               buildTaskTile(
                 label: 'Carcheck',
                 icon: Icons.fact_check_rounded,
                 isSelected: carcheckSelected,
-                onTap: () => setState(() => carcheckSelected = !carcheckSelected),
+                onTap: _forceAllTasks
+                    ? () {}
+                    : () => setState(() => carcheckSelected = !carcheckSelected),
               ),
               buildTaskTile(
                 label: 'Photo commercial',
                 icon: Icons.photo_camera_rounded,
                 isSelected: photoSelected,
-                onTap: () => setState(() => photoSelected = !photoSelected),
+                onTap: _forceAllTasks
+                    ? () {}
+                    : () => setState(() => photoSelected = !photoSelected),
               ),
               buildTaskTile(
                 label: 'Relevé d’options',
                 icon: Icons.build_circle_rounded,
                 isSelected: equipmentSelected,
-                onTap: () => setState(() => equipmentSelected = !equipmentSelected),
+                onTap: _forceAllTasks
+                    ? () {}
+                    : () => setState(() => equipmentSelected = !equipmentSelected),
               ),
               buildTaskTile(
                 label: 'Aviloo',
                 icon: Icons.science_rounded,
                 isSelected: avilooSelected,
-                onTap: () => setState(() => avilooSelected = !avilooSelected),
+                onTap: _forceAllTasks
+                    ? () {}
+                    : () => setState(() => avilooSelected = !avilooSelected),
               ),
 
               const SizedBox(height: 18),
 
-              // ===== CTA =====
               ElevatedButton(
                 onPressed: goToHome,
                 style: ElevatedButton.styleFrom(
@@ -386,15 +426,17 @@ class _LoginPageState extends State<LoginPage> {
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                   textStyle: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16),
                 ),
-                child: const Text('Suivant'),
+                child: Text(_forceAllTasks ? 'Accéder à l’afficheur' : 'Suivant'),
               ),
 
               const SizedBox(height: 10),
 
-              const Text(
-                "Astuce : tu peux activer plusieurs tâches. Elles seront envoyées au serveur lors de chaque validation.",
+              Text(
+                _forceAllTasks
+                    ? "Toutes les tâches sont activées pour le mode afficheur."
+                    : "Astuce : tu peux activer plusieurs tâches. Elles seront envoyées au serveur lors de chaque validation.",
                 textAlign: TextAlign.center,
-                style: TextStyle(color: _muted, fontWeight: FontWeight.w700, fontSize: 12),
+                style: const TextStyle(color: _muted, fontWeight: FontWeight.w700, fontSize: 12),
               ),
             ],
           ),
