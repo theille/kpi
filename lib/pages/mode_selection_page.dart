@@ -17,7 +17,6 @@ class _ModeSelectionPageState extends State<ModeSelectionPage> {
   static const _muted = Color(0xFF64748B);
   static const _accent = Color(0xFF2563EB);
 
-  // Pour l’instant on met Bouchain, tu pourras ajouter d’autres sites plus tard
   final List<String> _sites = const ['Bouchain'];
   String _selectedSite = 'Bouchain';
   bool _loading = true;
@@ -51,16 +50,35 @@ class _ModeSelectionPageState extends State<ModeSelectionPage> {
           await SitePrefs.setSite(_selectedSite);
           if (!context.mounted) return;
 
-          // ✅ Mode opérateur : on garde la page dans la pile pour pouvoir revenir en arrière si l'auth est annulée.
+          // ✅ Mode opérateur
           if (route == '/') {
             Navigator.pushNamed(
               context,
               route,
-              arguments: const {'requireOperatorAuth': true},
+              arguments: const {
+                'requireOperatorAuth': true,
+                'nextRoute': '/home',
+                'forceAllTasks': false,
+              },
             );
-          } else {
-            Navigator.pushReplacementNamed(context, route);
+            return;
           }
+
+          // ✅ Mode afficheur → passe aussi par LoginPage
+          if (route == '/display') {
+            Navigator.pushNamed(
+              context,
+              '/',
+              arguments: const {
+                'requireOperatorAuth': true,
+                'nextRoute': '/display',
+                'forceAllTasks': true,
+              },
+            );
+            return;
+          }
+
+          Navigator.pushReplacementNamed(context, route);
         },
         borderRadius: BorderRadius.circular(18),
         child: Container(
@@ -117,21 +135,26 @@ class _ModeSelectionPageState extends State<ModeSelectionPage> {
           child: Column(
             children: [
               const SizedBox(height: 40),
-              const Text('KPI',
-                  style: TextStyle(
-                      fontSize: 40,
-                      fontWeight: FontWeight.w900,
-                      color: _text)),
+              const Text(
+                'KPI',
+                style: TextStyle(
+                  fontSize: 40,
+                  fontWeight: FontWeight.w900,
+                  color: _text,
+                ),
+              ),
               const SizedBox(height: 8),
-              const Text('Sélection du mode',
-                  style: TextStyle(
-                      color: _muted, fontWeight: FontWeight.w700)),
+              const Text(
+                'Sélection du mode',
+                style: TextStyle(
+                  color: _muted,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
               const SizedBox(height: 28),
 
-              // ✅ Sélection du site
               Container(
-                padding:
-                const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                 decoration: BoxDecoration(
                   color: _card,
                   borderRadius: BorderRadius.circular(16),
@@ -141,22 +164,29 @@ class _ModeSelectionPageState extends State<ModeSelectionPage> {
                   children: [
                     const Icon(Icons.location_on_rounded, color: _accent),
                     const SizedBox(width: 10),
-                    const Text("Site",
-                        style: TextStyle(
-                            color: _text, fontWeight: FontWeight.w900)),
+                    const Text(
+                      "Site",
+                      style: TextStyle(
+                        color: _text,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
                     const Spacer(),
                     if (_loading)
                       const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2))
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
                     else
                       DropdownButtonHideUnderline(
                         child: DropdownButton<String>(
                           value: _selectedSite,
                           items: _sites
-                              .map((s) =>
-                              DropdownMenuItem(value: s, child: Text(s)))
+                              .map((s) => DropdownMenuItem(
+                            value: s,
+                            child: Text(s),
+                          ))
                               .toList(),
                           onChanged: (v) async {
                             if (v == null) return;
@@ -175,11 +205,14 @@ class _ModeSelectionPageState extends State<ModeSelectionPage> {
               buildModeCard(context, 'Mode afficheur', Icons.tv_rounded, '/display'),
 
               const Spacer(),
-              const Text('KPI System',
-                  style: TextStyle(
-                      color: _muted,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700)),
+              const Text(
+                'KPI System',
+                style: TextStyle(
+                  color: _muted,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
               const SizedBox(height: 10),
             ],
           ),
