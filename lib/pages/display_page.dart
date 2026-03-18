@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform;
+import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 import '../state/site_prefs.dart';
@@ -47,6 +48,12 @@ class _DisplayPageState extends State<DisplayPage> {
   final TextEditingController _searchController = TextEditingController();
   String _searchQuery = '';
 
+  // ✅ Swipe validation
+  final Set<String> _swipeBusyPlates = {};
+  OverlayEntry? _validationOverlay;
+  Timer? _validationOverlayTimer;
+  String? _lastInsertedValidationId;
+
   @override
   void initState() {
     super.initState();
@@ -65,6 +72,8 @@ class _DisplayPageState extends State<DisplayPage> {
   @override
   void dispose() {
     _searchController.dispose();
+    _validationOverlayTimer?.cancel();
+    _removeValidationPopup();
     if (_channel != null) {
       supabase.removeChannel(_channel!);
     }
@@ -74,6 +83,202 @@ class _DisplayPageState extends State<DisplayPage> {
   // ✅ Nettoie la plaque pour le QR : uniquement lettres et chiffres
   String _sanitizePlateForQr(String plate) {
     return plate.toUpperCase().replaceAll(RegExp(r'[^A-Z0-9]'), '');
+  }
+
+  String _todayKpiDateUtc() {
+    final now = DateTime.now().toUtc();
+    final yyyy = now.year.toString().padLeft(4, '0');
+    final mm = now.month.toString().padLeft(2, '0');
+    final dd = now.day.toString().padLeft(2, '0');
+    return "$yyyy-$mm-$dd";
+  }
+
+  List<String> _buildMissingTasksBackend(Map<String, dynamic> v) {
+    final tasks = <String>[];
+
+    final requiredDamage = v['required_damage'] == true;
+    final requiredCarcheck = v['required_carcheck'] == true;
+    final requiredPhoto = v['required_photo'] == true;
+    final requiredEquipment = v['required_equipment'] == true;
+    final requiredAviloo = v['required_aviloo'] == true;
+
+    final doneDamage = v['done_damage'] == true;
+    final doneCarcheck = v['done_carcheck'] == true;
+    final donePhoto = v['done_photo'] == true;
+    final doneEquipment = v['done_equipment'] == true;
+    final doneAviloo = v['done_aviloo'] == true;
+
+    if (requiredDamage && !doneDamage) tasks.add('damage');
+    if (requiredCarcheck && !doneCarcheck) tasks.add('carcheck');
+    if (requiredPhoto && !donePhoto) tasks.add('photo');
+    if (requiredEquipment && !doneEquipment) tasks.add('equipment');
+    if (requiredAviloo && !doneAviloo) tasks.add('aviloo');
+
+    return tasks;
+  }
+
+  Future<void> _validateVehicleBySwipe(Map<String, dynamic> vehicle) async {
+    final plate = (vehicle['plate'] ?? '').toString().trim();
+    if (plate.isEmpty) return;
+    if (_swipeBusyPlates.contains(plate)) return;
+
+    setState(() {
+      _swipeBusyPlates.add(plate);
+    });
+
+    try {
+      HapticFeedback.mediumImpact();
+
+      final kpiDate = _todayKpiDateUtc();
+      final tasksDone = _buildMissingTasksBackend(vehicle);
+
+      final inserted = await supabase
+          .from('validations')
+          .insert({
+        'kpi_date': kpiDate,
+        'plate': plate,
+        'tasks_done': tasksDone,
+        'operator_name': null,
+      })
+          .select('id')
+          .single();
+
+      _lastInsertedValidationId = inserted['id']?.toString();
+
+      if (!mounted) return;
+      _showValidationPopup(plate: plate);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Erreur validation slide : $e")),
+      );
+    } finally {
+      if (!mounted) return;
+      setState(() {
+        _swipeBusyPlates.remove(plate);
+      });
+    }
+  }
+
+  Future<void> _undoSwipeValidation() async {
+    final validationId = _lastInsertedValidationId;
+    if (validationId == null) return;
+
+    try {
+      await supabase
+          .from('validations')
+          .delete()
+          .eq('id', validationId);
+
+      _lastInsertedValidationId = null;
+
+      if (!mounted) return;
+      HapticFeedback.selectionClick();
+      _removeValidationPopup();
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Validation annulée")),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Impossible d’annuler : $e")),
+      );
+    }
+  }
+
+  void _showValidationPopup({required String plate}) {
+    _removeValidationPopup();
+    _validationOverlayTimer?.cancel();
+
+    _validationOverlay = OverlayEntry(
+      builder: (context) {
+        final width = MediaQuery.of(context).size.width;
+        final popupWidth = width < 420 ? width - 32 : 320.0;
+
+        return Positioned(
+          left: 0,
+          right: 0,
+          bottom: 14,
+          child: IgnorePointer(
+            ignoring: false,
+            child: Center(
+              child: Material(
+                color: Colors.transparent,
+                child: Container(
+                  width: popupWidth,
+                  height: 42,
+                  padding: const EdgeInsets.symmetric(horizontal: 14),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0F172A),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(color: const Color(0xFF1E293B)),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Color(0x33000000),
+                        blurRadius: 16,
+                        offset: Offset(0, 8),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.check_circle_rounded,
+                        color: Color(0xFF22C55E),
+                        size: 18,
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          "Validé : $plate",
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w900,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      InkWell(
+                        onTap: _undoSwipeValidation,
+                        borderRadius: BorderRadius.circular(999),
+                        child: const Padding(
+                          padding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+                          child: Text(
+                            "Annuler",
+                            style: TextStyle(
+                              color: Color(0xFF93C5FD),
+                              fontWeight: FontWeight.w900,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+
+    Overlay.of(context).insert(_validationOverlay!);
+
+    _validationOverlayTimer = Timer(const Duration(seconds: 5), () {
+      _removeValidationPopup();
+      _lastInsertedValidationId = null;
+    });
+  }
+
+  void _removeValidationPopup() {
+    _validationOverlayTimer?.cancel();
+    _validationOverlayTimer = null;
+    _validationOverlay?.remove();
+    _validationOverlay = null;
   }
 
   // ✅ Popup QR agrandi
@@ -107,9 +312,9 @@ class _DisplayPageState extends State<DisplayPage> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
+                const Text(
                   "QR Code véhicule",
-                  style: const TextStyle(
+                  style: TextStyle(
                     color: Color(0xFF0F172A),
                     fontWeight: FontWeight.w900,
                     fontSize: 20,
@@ -223,14 +428,6 @@ class _DisplayPageState extends State<DisplayPage> {
     setState(() {
       vehiclesToProcess = _filteredListFrom(_allVehiclesToProcess);
     });
-  }
-
-  String _todayKpiDateUtc() {
-    final now = DateTime.now().toUtc();
-    final yyyy = now.year.toString().padLeft(4, '0');
-    final mm = now.month.toString().padLeft(2, '0');
-    final dd = now.day.toString().padLeft(2, '0');
-    return "$yyyy-$mm-$dd";
   }
 
   Future<void> _loadAll() async {
@@ -445,15 +642,13 @@ class _DisplayPageState extends State<DisplayPage> {
 
     final isAndroid = !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
-    // ✅ “Compact” Android sans réduire la largeur (contrairement à Transform.scale)
-    // Windows = 1.0 (inchangé)
+    // ✅ “Compact” Android sans réduire la largeur
     final double ui = isAndroid ? 0.90 : 1.0;
 
     double s(double v) => v * ui;
 
     final mq = MediaQuery.of(context);
     final wrapped = MediaQuery(
-      // ✅ évite les boitiers Android qui appliquent un zoom texte énorme
       data: isAndroid ? mq.copyWith(textScaler: const TextScaler.linear(1.0)) : mq,
       child: Scaffold(
         backgroundColor: bg,
@@ -581,7 +776,7 @@ class _DisplayPageState extends State<DisplayPage> {
 
                         SizedBox(width: s(12)),
 
-                        // ✅ Filtre date (local) juste à côté d'Actualiser
+                        // ✅ Filtre date
                         Container(
                           padding: EdgeInsets.symmetric(horizontal: s(12), vertical: s(2)),
                           decoration: BoxDecoration(
@@ -639,7 +834,7 @@ class _DisplayPageState extends State<DisplayPage> {
                     ),
                   ),
 
-                  // ===== KPI CARDS : 6 alignées pleine largeur =====
+                  // ===== KPI CARDS =====
                   Padding(
                     padding: EdgeInsets.fromLTRB(s(18), s(14), s(18), s(12)),
                     child: Row(
@@ -717,7 +912,6 @@ class _DisplayPageState extends State<DisplayPage> {
                           final isWide = c.maxWidth >= 900;
 
                           if (!isWide) {
-                            // Sur petit écran, on empile (sinon trop serré)
                             return Column(
                               children: [
                                 Expanded(child: _VehicleTableLight(ui)),
@@ -735,8 +929,7 @@ class _DisplayPageState extends State<DisplayPage> {
                             );
                           }
 
-                          // Sur écran large: table principale 3/4+, colonne fine à droite
-                          final rightWidth = s(230); // Android plus compact, mais largeur reste utilisée
+                          final rightWidth = s(230);
                           return Row(
                             children: [
                               Expanded(child: _VehicleTableLight(ui)),
@@ -865,6 +1058,7 @@ class _DisplayPageState extends State<DisplayPage> {
                 final entryIso = v['urgency_time'];
                 final forecastSales = (v['forecast_sales'] ?? '').toString().trim();
                 final hasForecastSales = forecastSales.isNotEmpty;
+                final isSwipeBusy = _swipeBusyPlates.contains(plate);
 
                 final requiredDamage = v['required_damage'] == true;
                 final requiredCarcheck = v['required_carcheck'] == true;
@@ -885,124 +1079,183 @@ class _DisplayPageState extends State<DisplayPage> {
                 final avilooState = _taskState(requiredTask: requiredAviloo, doneTask: doneAviloo);
 
                 final fullyValidated = v['fully_validated'] == true;
-                // deadline calculé mais non affiché (inchangé volontairement)
                 final _ = _deadline(entryIso);
 
-                return Container(
-                  padding: EdgeInsets.symmetric(horizontal: s(12), vertical: s(10)),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(s(12)),
-                    border: Border.all(color: border),
+                return Dismissible(
+                  key: ValueKey('swipe_${plate}_$index'),
+                  direction: isSwipeBusy
+                      ? DismissDirection.none
+                      : DismissDirection.endToStart,
+                  dismissThresholds: const {
+                    DismissDirection.endToStart: 0.28,
+                  },
+                  confirmDismiss: (_) async {
+                    await _validateVehicleBySwipe(v);
+                    return false;
+                  },
+                  background: Container(
+                    padding: EdgeInsets.symmetric(horizontal: s(18)),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF16A34A),
+                      borderRadius: BorderRadius.circular(s(12)),
+                    ),
+                    alignment: Alignment.centerRight,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        Icon(
+                          Icons.check_circle_rounded,
+                          color: Colors.white,
+                          size: s(20),
+                        ),
+                        SizedBox(width: s(8)),
+                        Text(
+                          "Valider",
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w900,
+                            fontSize: s(13),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        flex: 4,
-                        child: Row(
-                          children: [
-                            Icon(
-                              fullyValidated ? Icons.check_circle_rounded : Icons.directions_car_rounded,
-                              color: fullyValidated ? const Color(0xFF16A34A) : const Color(0xFF94A3B8),
-                              size: s(18),
-                            ),
-                            SizedBox(width: s(10)),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  FrenchPlate(plate: plate, ui: ui),
-                                  SizedBox(height: s(4)),
-                                  Text(
-                                    "${brand.isEmpty ? "" : brand} ${model.isEmpty ? "" : model}".trim().isEmpty
-                                        ? "—"
-                                        : "${brand.isEmpty ? "" : brand} ${model.isEmpty ? "" : model}".trim(),
-                                    style: TextStyle(
-                                      color: textMuted,
-                                      fontWeight: FontWeight.w700,
-                                      fontSize: s(11),
-                                    ),
-                                    overflow: TextOverflow.ellipsis,
+                  child: Opacity(
+                    opacity: isSwipeBusy ? 0.72 : 1,
+                    child: Container(
+                      padding: EdgeInsets.symmetric(horizontal: s(12), vertical: s(10)),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(s(12)),
+                        border: Border.all(color: border),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            flex: 4,
+                            child: Row(
+                              children: [
+                                Icon(
+                                  fullyValidated ? Icons.check_circle_rounded : Icons.directions_car_rounded,
+                                  color: fullyValidated
+                                      ? const Color(0xFF16A34A)
+                                      : const Color(0xFF94A3B8),
+                                  size: s(18),
+                                ),
+                                SizedBox(width: s(10)),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      FrenchPlate(plate: plate, ui: ui),
+                                      SizedBox(height: s(4)),
+                                      Text(
+                                        "${brand.isEmpty ? "" : brand} ${model.isEmpty ? "" : model}".trim().isEmpty
+                                            ? "—"
+                                            : "${brand.isEmpty ? "" : brand} ${model.isEmpty ? "" : model}".trim(),
+                                        style: TextStyle(
+                                          color: textMuted,
+                                          fontWeight: FontWeight.w700,
+                                          fontSize: s(11),
+                                        ),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ],
                                   ),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Expanded(
-                        flex: 3,
-                        child: Text(
-                          _formatDate(entryIso),
-                          style: TextStyle(
-                            color: textPrimary,
-                            fontWeight: FontWeight.w800,
-                            fontSize: s(12),
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      SizedBox(width: s(8)),
-                      Expanded(
-                        flex: 3,
-                        child: Text(
-                          hasForecastSales ? forecastSales : '',
-                          style: TextStyle(
-                            color: textMuted,
-                            fontWeight: FontWeight.w700,
-                            fontSize: s(11),
-                          ),
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      SizedBox(width: s(8)),
-                      Expanded(
-                        flex: 8,
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.center,
-                          children: [
-                            Expanded(
-                              child: Wrap(
-                                spacing: s(8),
-                                runSpacing: s(8),
-                                children: [
-                                  _OpChipLight(ui: ui, label: "Relevé", state: damageState),
-                                  _OpChipLight(ui: ui, label: "Carcheck", state: carcheckState),
-                                  _OpChipLight(ui: ui, label: "Photo", state: photoState),
-                                  _OpChipLight(ui: ui, label: "Équip.", state: equipmentState),
-                                  _OpChipLight(ui: ui, label: "Aviloo", state: avilooState),
-                                ],
-                              ),
-                            ),
-                            SizedBox(width: s(10)),
-                            qrPlate.isEmpty
-                                ? const SizedBox.shrink()
-                                : InkWell(
-                              onTap: () => _showQrPopup(
-                                plate: plate,
-                                qrPlate: qrPlate,
-                              ),
-                              borderRadius: BorderRadius.circular(s(8)),
-                              child: Container(
-                                padding: EdgeInsets.all(s(4)),
-                                decoration: BoxDecoration(
-                                  color: Colors.white,
-                                  borderRadius: BorderRadius.circular(s(8)),
-                                  border: Border.all(color: border),
                                 ),
-                                child: QrImageView(
-                                  data: qrPlate,
-                                  version: QrVersions.auto,
-                                  size: s(46),
-                                  backgroundColor: Colors.white,
-                                ),
-                              ),
+                              ],
                             ),
-                          ],
-                        ),
+                          ),
+                          Expanded(
+                            flex: 3,
+                            child: Text(
+                              _formatDate(entryIso),
+                              style: TextStyle(
+                                color: textPrimary,
+                                fontWeight: FontWeight.w800,
+                                fontSize: s(12),
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          SizedBox(width: s(8)),
+                          Expanded(
+                            flex: 3,
+                            child: Text(
+                              hasForecastSales ? forecastSales : '',
+                              style: TextStyle(
+                                color: textMuted,
+                                fontWeight: FontWeight.w700,
+                                fontSize: s(11),
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          SizedBox(width: s(8)),
+                          Expanded(
+                            flex: 8,
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.center,
+                              children: [
+                                Expanded(
+                                  child: Wrap(
+                                    spacing: s(8),
+                                    runSpacing: s(8),
+                                    children: [
+                                      _OpChipLight(ui: ui, label: "Relevé", state: damageState),
+                                      _OpChipLight(ui: ui, label: "Carcheck", state: carcheckState),
+                                      _OpChipLight(ui: ui, label: "Photo", state: photoState),
+                                      _OpChipLight(ui: ui, label: "Équip.", state: equipmentState),
+                                      _OpChipLight(ui: ui, label: "Aviloo", state: avilooState),
+                                    ],
+                                  ),
+                                ),
+                                SizedBox(width: s(10)),
+                                if (isSwipeBusy)
+                                  Container(
+                                    width: s(46),
+                                    height: s(46),
+                                    alignment: Alignment.center,
+                                    decoration: BoxDecoration(
+                                      color: Colors.white,
+                                      borderRadius: BorderRadius.circular(s(8)),
+                                      border: Border.all(color: border),
+                                    ),
+                                    child: SizedBox(
+                                      width: s(18),
+                                      height: s(18),
+                                      child: const CircularProgressIndicator(strokeWidth: 2.2),
+                                    ),
+                                  )
+                                else if (qrPlate.isNotEmpty)
+                                  InkWell(
+                                    onTap: () => _showQrPopup(
+                                      plate: plate,
+                                      qrPlate: qrPlate,
+                                    ),
+                                    borderRadius: BorderRadius.circular(s(8)),
+                                    child: Container(
+                                      padding: EdgeInsets.all(s(4)),
+                                      decoration: BoxDecoration(
+                                        color: Colors.white,
+                                        borderRadius: BorderRadius.circular(s(8)),
+                                        border: Border.all(color: border),
+                                      ),
+                                      child: QrImageView(
+                                        data: qrPlate,
+                                        version: QrVersions.auto,
+                                        size: s(46),
+                                        backgroundColor: Colors.white,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
                 );
               },
@@ -1286,7 +1539,6 @@ class _LastValidatedLightNarrow extends StatelessWidget {
       ),
       child: Column(
         children: [
-          // header très compact
           Container(
             padding: EdgeInsets.symmetric(horizontal: s(10), vertical: s(8)),
             decoration: BoxDecoration(
@@ -1305,7 +1557,6 @@ class _LastValidatedLightNarrow extends StatelessWidget {
               ],
             ),
           ),
-
           Expanded(
             child: loading
                 ? const SizedBox.shrink()
@@ -1388,11 +1639,7 @@ class _EuStarsPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
-
-    // Rayon du cercle des étoiles (comme le drapeau UE)
     final ringRadius = size.width * 0.34;
-
-    // Taille des étoiles
     final outerR = size.width * 0.08;
     final innerR = outerR * 0.45;
 
@@ -1402,7 +1649,6 @@ class _EuStarsPainter extends CustomPainter {
       ..isAntiAlias = true;
 
     for (int i = 0; i < 12; i++) {
-      // -90° pour commencer en haut
       final a = (-math.pi / 2) + (i * 2 * math.pi / 12);
       final starCenter = center +
           Offset(
@@ -1415,7 +1661,7 @@ class _EuStarsPainter extends CustomPainter {
         outerRadius: outerR,
         innerRadius: innerR,
         points: 5,
-        rotation: -math.pi / 2, // étoile "droite"
+        rotation: -math.pi / 2,
       );
 
       canvas.drawPath(path, paint);
@@ -1430,7 +1676,7 @@ class _EuStarsPainter extends CustomPainter {
     double rotation = 0,
   }) {
     final path = Path();
-    final step = math.pi / points; // 10 segments pour 5 branches
+    final step = math.pi / points;
 
     for (int i = 0; i < points * 2; i++) {
       final r = (i.isEven) ? outerRadius : innerRadius;
@@ -1455,7 +1701,7 @@ class _EuStarsPainter extends CustomPainter {
 
 class FrenchPlate extends StatelessWidget {
   final String plate;
-  final bool compact; // true = version petite (colonne Validés)
+  final bool compact;
   final double? height;
   final double ui;
 
@@ -1478,7 +1724,7 @@ class FrenchPlate extends StatelessWidget {
       height: h,
       padding: EdgeInsets.all(s(2)),
       decoration: BoxDecoration(
-        color: const Color(0xFF0B0B0B), // bord noir
+        color: const Color(0xFF0B0B0B),
         borderRadius: BorderRadius.circular(s(6)),
         boxShadow: [
           BoxShadow(
@@ -1492,7 +1738,6 @@ class FrenchPlate extends StatelessWidget {
         borderRadius: BorderRadius.circular(s(5)),
         child: Row(
           children: [
-            // Bande bleue (EU + F)
             Container(
               width: s(compact ? 22 : 26),
               color: const Color(0xFF003399),
@@ -1516,8 +1761,6 @@ class FrenchPlate extends StatelessWidget {
                 ],
               ),
             ),
-
-            // Partie blanche (texte plaque)
             Expanded(
               child: Container(
                 color: const Color(0xFFF7F7F7),
