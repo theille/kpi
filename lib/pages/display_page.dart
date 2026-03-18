@@ -43,6 +43,10 @@ class _DisplayPageState extends State<DisplayPage> {
   List<DateTime> availableEntryDates = [];
   DateTime? selectedEntryDate;
 
+  // ✅ Recherche locale
+  final TextEditingController _searchController = TextEditingController();
+  String _searchQuery = '';
+
   @override
   void initState() {
     super.initState();
@@ -60,6 +64,7 @@ class _DisplayPageState extends State<DisplayPage> {
 
   @override
   void dispose() {
+    _searchController.dispose();
     if (_channel != null) {
       supabase.removeChannel(_channel!);
     }
@@ -184,14 +189,32 @@ class _DisplayPageState extends State<DisplayPage> {
 
   // ✅ applique le filtre local sur une liste donnée
   List<Map<String, dynamic>> _filteredListFrom(List<Map<String, dynamic>> all) {
-    if (selectedEntryDate == null) return List<Map<String, dynamic>>.from(all);
+    final query = _searchQuery.trim().toLowerCase();
 
     return all.where((v) {
-      final d = _toDay(v['urgency_time']); // ✅ date d'entrée
-      return d != null &&
-          d.year == selectedEntryDate!.year &&
-          d.month == selectedEntryDate!.month &&
-          d.day == selectedEntryDate!.day;
+      final matchesDate = selectedEntryDate == null
+          ? true
+          : (() {
+        final d = _toDay(v['urgency_time']); // ✅ date d'entrée
+        return d != null &&
+            d.year == selectedEntryDate!.year &&
+            d.month == selectedEntryDate!.month &&
+            d.day == selectedEntryDate!.day;
+      })();
+
+      if (!matchesDate) return false;
+
+      if (query.isEmpty) return true;
+
+      final plate = (v['plate'] ?? '').toString().toLowerCase();
+      final brand = (v['brand'] ?? '').toString().toLowerCase();
+      final model = (v['model'] ?? '').toString().toLowerCase();
+      final forecastSales = (v['forecast_sales'] ?? '').toString().toLowerCase();
+
+      return plate.contains(query) ||
+          brand.contains(query) ||
+          model.contains(query) ||
+          forecastSales.contains(query);
     }).toList();
   }
 
@@ -492,7 +515,71 @@ class _DisplayPageState extends State<DisplayPage> {
                             ],
                           ),
                         ),
-                        const Spacer(),
+                        SizedBox(width: s(12)),
+
+                        // ✅ Barre de recherche
+                        Expanded(
+                          child: Container(
+                            height: s(42),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFF8FAFC),
+                              borderRadius: BorderRadius.circular(s(12)),
+                              border: Border.all(color: border),
+                            ),
+                            child: TextField(
+                              controller: _searchController,
+                              onChanged: (value) {
+                                setState(() {
+                                  _searchQuery = value;
+                                  vehiclesToProcess = _filteredListFrom(_allVehiclesToProcess);
+                                });
+                              },
+                              style: TextStyle(
+                                color: textPrimary,
+                                fontWeight: FontWeight.w700,
+                                fontSize: s(12),
+                              ),
+                              decoration: InputDecoration(
+                                isDense: true,
+                                border: InputBorder.none,
+                                hintText: "Rechercher immat, marque, modèle, forecast…",
+                                hintStyle: TextStyle(
+                                  color: textMuted,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: s(12),
+                                ),
+                                prefixIcon: Icon(
+                                  Icons.search_rounded,
+                                  color: textMuted,
+                                  size: s(18),
+                                ),
+                                suffixIcon: _searchQuery.isEmpty
+                                    ? null
+                                    : IconButton(
+                                  onPressed: () {
+                                    _searchController.clear();
+                                    setState(() {
+                                      _searchQuery = '';
+                                      vehiclesToProcess = _filteredListFrom(_allVehiclesToProcess);
+                                    });
+                                  },
+                                  icon: Icon(
+                                    Icons.close_rounded,
+                                    color: textMuted,
+                                    size: s(18),
+                                  ),
+                                  splashRadius: s(18),
+                                ),
+                                contentPadding: EdgeInsets.symmetric(
+                                  horizontal: s(12),
+                                  vertical: s(10),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+
+                        SizedBox(width: s(12)),
 
                         // ✅ Filtre date (local) juste à côté d'Actualiser
                         Container(
